@@ -72,7 +72,22 @@ LIB_NAME="lib${CRATE_NAME}.a"
 # desktop build environment leak into the iOS build, otherwise it might e.g.
 # link against the desktop build of NSS.
 
-CARGO="$HOME/.cargo/bin/cargo"
+CARGO="${CARGO:-$(command -v cargo || true)}"
+if [[ -z "$CARGO" ]] || [[ ! -x "$CARGO" ]]; then
+  echo "Could not locate cargo; set CARGO or add it to PATH"
+  exit 1
+fi
+export CARGO
+RUST_TOOLCHAIN_ENV=()
+if [[ -n "${CARGO_HOME:-}" ]]; then
+  RUST_TOOLCHAIN_ENV+=(CARGO_HOME="$CARGO_HOME")
+fi
+if [[ -n "${RUSTUP_HOME:-}" ]]; then
+  RUST_TOOLCHAIN_ENV+=(RUSTUP_HOME="$RUSTUP_HOME")
+fi
+if [[ -n "${RUSTUP_TOOLCHAIN:-}" ]]; then
+  RUST_TOOLCHAIN_ENV+=(RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN")
+fi
 if [[ "$IS_MONOREPO" == "true" ]]; then
 LIBS_ROOT_DIR=$REPO_ROOT/third_party/application-services
 else
@@ -106,6 +121,7 @@ cargo_build () {
       echo "Unexpected target architecture: $TARGET" && exit 1;;
   esac
   env -i \
+    "${RUST_TOOLCHAIN_ENV[@]}" \
     NSS_STATIC=1 \
     NSS_DIR="$LIBS_DIR/nss" \
     IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \

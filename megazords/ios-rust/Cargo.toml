@@ -15,6 +15,7 @@ viaduct-hyper = { path = "../../components/support/viaduct-hyper" }
 nimbus-sdk = { path = "../../components/nimbus" }
 crashtest = { path = "../../components/crashtest" }
 fxa-client = { path = "../../components/fxa-client" }
+floorp-prefs-sync = { path = "../../components/floorp-prefs-sync" }
 logins = { path = "../../components/logins" }
 autofill = { path = "../../components/autofill" }
 push = { path = "../../components/push" }

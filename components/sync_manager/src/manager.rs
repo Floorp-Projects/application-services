@@ -19,6 +19,7 @@ use sync15::engine::{EngineSyncAssociation, SyncEngine, SyncEngineId};
 
 #[derive(Default)]
 pub struct SyncManager {
+    operation: Mutex<()>,
     mem_cached_state: Mutex<Option<MemoryCachedState>>,
 }
 
@@ -39,10 +40,25 @@ impl SyncManager {
             SyncEngineId::CreditCards => autofill::get_registered_sync_engine(engine_id),
             SyncEngineId::Passwords => logins::get_registered_sync_engine(engine_id),
             SyncEngineId::Tabs => tabs::get_registered_sync_engine(engine_id),
+            SyncEngineId::Prefs => floorp_prefs_sync::get_registered_sync_engine(engine_id),
         }
     }
 
+    fn validate_enabled_changes(enabled_changes: &HashMap<String, bool>) -> Result<()> {
+        // `prefs` is a shared aggregate collection used by Desktop and other
+        // products. It is a per-run special engine, never a toggleable engine.
+        // In particular, the generic disable path declines it globally and
+        // wipes the entire remote collection, not just Floorp Notes.
+        if enabled_changes.contains_key(floorp_prefs_sync::PREFS_COLLECTION_NAME) {
+            return Err(SyncManagerError::UnsupportedFeature(
+                "changing enablement of the shared prefs collection".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn wipe(&self, engine_name: &str) -> Result<()> {
+        let _operation = self.operation.lock();
         if let Some(engine) = Self::get_engine(&Self::get_engine_id(engine_name)?) {
             engine.wipe()?;
         }
@@ -50,6 +66,7 @@ impl SyncManager {
     }
 
     pub fn reset(&self, engine_name: &str) -> Result<()> {
+        let _operation = self.operation.lock();
         if let Some(engine) = Self::get_engine(&Self::get_engine_id(engine_name)?) {
             engine.reset(&EngineSyncAssociation::Disconnected)?;
         }
@@ -57,6 +74,7 @@ impl SyncManager {
     }
 
     pub fn reset_all(&self) -> Result<()> {
+        let _operation = self.operation.lock();
         for (_, engine) in self.iter_registered_engines() {
             engine.reset(&EngineSyncAssociation::Disconnected)?;
         }
@@ -66,6 +84,10 @@ impl SyncManager {
     /// Disconnect engines from sync, deleting/resetting the sync-related data
     pub fn disconnect(&self) {
         breadcrumb!("SyncManager disconnect()");
+        // A disconnect/reset must not invalidate a prepared prefs transaction
+        // after it has returned an outgoing record but before sync15 uploads
+        // it. Serialize the complete operation with `sync`.
+        let _operation = self.operation.lock();
         for engine_id in SyncEngineId::iter() {
             if let Some(engine) = Self::get_engine(&engine_id) {
                 if let Err(e) = engine.reset(&EngineSyncAssociation::Disconnected) {
@@ -85,6 +107,8 @@ impl SyncManager {
     /// Perform a sync.  See [SyncParams] and [SyncResult] for details on how this works
     pub fn sync(&self, params: SyncParams) -> Result<SyncResult> {
         breadcrumb!("SyncManager::sync started");
+        Self::validate_enabled_changes(&params.enabled_changes)?;
+        let _operation = self.operation.lock();
         let mut state = self.mem_cached_state.lock();
         let engines = self.calc_engines_to_sync(&params.engines)?;
         let next_sync_after = state.as_ref().and_then(|mcs| mcs.get_next_sync_after());
@@ -200,6 +224,10 @@ impl SyncManager {
 
     pub fn get_available_engines(&self) -> Vec<String> {
         self.iter_registered_engines()
+            // The embedding app treats this list as engines that can be
+            // toggled. `prefs` is intentionally selectable only by an explicit
+            // per-run request, because globally disabling it wipes shared data.
+            .filter(|(name, _)| name != &SyncEngineId::Prefs)
             .map(|(name, _)| name.to_string())
             .collect()
     }
@@ -233,6 +261,10 @@ impl SyncManager {
             }
             // Filter engines based on the selection
             engine_map.retain(|engine_id, _| selected_engine_ids.contains(engine_id))
+        } else {
+            // The shared prefs transport is opt-in per run. `All` means all
+            // ordinary engines; a Floorp caller must name `prefs` explicitly.
+            engine_map.remove(&SyncEngineId::Prefs);
         }
         Ok(engine_map.into_values().collect())
     }
@@ -312,11 +344,127 @@ impl CommandProcessor for SyncClient {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct PrefsBoundaryDelegate {
+        association_resets: AtomicUsize,
+    }
+
+    impl floorp_prefs_sync::FloorpPrefsSyncDelegate for PrefsBoundaryDelegate {
+        fn prepare(
+            &self,
+            _input: floorp_prefs_sync::FloorpPrefsSyncPrepareInput,
+        ) -> floorp_prefs_sync::Result<floorp_prefs_sync::FloorpPrefsSyncPlan> {
+            Err(floorp_prefs_sync::FloorpPrefsSyncError::DelegateRejected)
+        }
+
+        fn sync_finished(
+            &self,
+            _finish: floorp_prefs_sync::FloorpPrefsSyncFinish,
+        ) -> floorp_prefs_sync::Result<()> {
+            Ok(())
+        }
+
+        fn sync_state_changed(
+            &self,
+            _state: floorp_prefs_sync::FloorpPrefsSyncState,
+        ) -> floorp_prefs_sync::Result<()> {
+            Ok(())
+        }
+
+        fn association_reset(
+            &self,
+            _state: floorp_prefs_sync::FloorpPrefsSyncState,
+        ) -> floorp_prefs_sync::Result<()> {
+            self.association_resets.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_engine_id_sanity() {
         for engine_id in SyncEngineId::iter() {
             assert_eq!(engine_id, SyncEngineId::try_from(engine_id.name()).unwrap());
         }
+    }
+
+    #[test]
+    fn prefs_enablement_changes_are_always_rejected() {
+        let mut changes = HashMap::new();
+        changes.insert(floorp_prefs_sync::PREFS_COLLECTION_NAME.to_string(), true);
+        assert!(matches!(
+            SyncManager::validate_enabled_changes(&changes),
+            Err(SyncManagerError::UnsupportedFeature(_))
+        ));
+
+        changes.insert(floorp_prefs_sync::PREFS_COLLECTION_NAME.to_string(), false);
+        assert!(matches!(
+            SyncManager::validate_enabled_changes(&changes),
+            Err(SyncManagerError::UnsupportedFeature(_))
+        ));
+    }
+
+    #[test]
+    fn prefs_is_hidden_from_toggles_but_explicitly_selectable_and_locally_resettable() {
+        let delegate = Arc::new(PrefsBoundaryDelegate::default());
+        let foreign_delegate: Arc<dyn floorp_prefs_sync::FloorpPrefsSyncDelegate> =
+            delegate.clone();
+        let store =
+            Arc::new(floorp_prefs_sync::FloorpPrefsSyncStore::new(foreign_delegate, None).unwrap());
+        Arc::clone(&store).register_with_sync_manager();
+
+        let manager = Arc::new(SyncManager::new());
+        assert!(!manager
+            .get_available_engines()
+            .iter()
+            .any(|engine| engine == floorp_prefs_sync::PREFS_COLLECTION_NAME));
+        let selected = manager
+            .calc_engines_to_sync(&SyncEngineSelection::Some {
+                engines: vec![floorp_prefs_sync::PREFS_COLLECTION_NAME.to_string()],
+            })
+            .unwrap();
+        assert!(selected.len() == 1);
+        assert!(selected[0].collection_name().as_ref() == floorp_prefs_sync::PREFS_COLLECTION_NAME);
+        let all = manager
+            .calc_engines_to_sync(&SyncEngineSelection::All)
+            .unwrap();
+        assert!(!all
+            .iter()
+            .any(|engine| engine.collection_name().as_ref()
+                == floorp_prefs_sync::PREFS_COLLECTION_NAME));
+
+        manager
+            .reset(floorp_prefs_sync::PREFS_COLLECTION_NAME)
+            .unwrap();
+        manager
+            .wipe(floorp_prefs_sync::PREFS_COLLECTION_NAME)
+            .unwrap();
+        assert!(delegate.association_resets.load(Ordering::Relaxed) == 2);
+
+        // Hold the same operation guard used by `sync` and prove that a
+        // concurrent disconnect cannot reset prefs until the run releases it.
+        let operation = manager.operation.lock();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let manager_for_disconnect = Arc::clone(&manager);
+        let disconnect = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            manager_for_disconnect.disconnect();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(delegate.association_resets.load(Ordering::Relaxed) == 2);
+        drop(operation);
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        disconnect.join().unwrap();
+        assert!(delegate.association_resets.load(Ordering::Relaxed) == 3);
     }
 }

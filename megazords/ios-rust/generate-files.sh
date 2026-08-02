@@ -36,7 +36,11 @@ COMMON=$2
 # It's important that we don't let environment variables from the user's default
 # desktop build environment leak into the iOS build, otherwise it might e.g.
 # link against the desktop build of NSS.
-CARGO="$HOME/.cargo/bin/cargo"
+CARGO="${CARGO:-$(command -v cargo || true)}"
+if [[ -z "$CARGO" ]] || [[ ! -x "$CARGO" ]]; then
+    echo "Could not locate cargo; set CARGO or add it to PATH"
+    exit 1
+fi
 
 UNIFFI_BINDGEN_DIR="$THIS_DIR/../../tools/uniffi-bindgen-library-mode"
 UNIFFI_BINDGEN_COMMAND="$CARGO run --manifest-path=$UNIFFI_BINDGEN_DIR/Cargo.toml --"

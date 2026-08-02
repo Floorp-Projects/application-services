@@ -1551,6 +1551,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "floorp-prefs-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "error-support",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sync15",
+ "thiserror 2.0.3",
+ "uniffi",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2639,6 +2653,7 @@ dependencies = [
  "context_id",
  "crashtest",
  "error-support",
+ "floorp-prefs-sync",
  "fxa-client",
  "init_rust_components",
  "logins",
@@ -4330,6 +4345,7 @@ dependencies = [
  "anyhow",
  "autofill",
  "error-support",
+ "floorp-prefs-sync",
  "interrupt-support",
  "lazy_static",
  "logins",

@@ -1,0 +1,18 @@
+[package]
+name = "floorp-prefs-sync"
+version = "0.1.0"
+authors = ["Floorp Project <support@floorp.app>"]
+edition = "2021"
+license = "MPL-2.0"
+
+[dependencies]
+anyhow = "1.0"
+parking_lot = ">=0.11,<=0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sync15 = { path = "../sync15", features = ["sync-engine"] }
+thiserror = "2"
+uniffi = { version = "0.31" }
+
+[dev-dependencies]
+error-support = { path = "../support/error", features = ["testing"] }

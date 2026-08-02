@@ -9,6 +9,7 @@
 #import "ads_clientFFI.h"
 #import "autofillFFI.h"
 #import "crashtestFFI.h"
+#import "floorp_prefs_syncFFI.h"
 #import "fxa_clientFFI.h"
 #import "loginsFFI.h"
 #import "nimbusFFI.h"

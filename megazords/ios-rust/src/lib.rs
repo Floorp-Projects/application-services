@@ -11,6 +11,7 @@ pub use autofill;
 pub use context_id;
 pub use crashtest;
 pub use error_support;
+pub use floorp_prefs_sync;
 pub use fxa_client;
 pub use init_rust_components;
 pub use logins;

@@ -36,6 +36,7 @@ pub enum SyncEngineId {
     // of the variants. We leverage that such that the higher priority engines
     // are listed first.
     // This order matches desktop.
+    Prefs,
     Passwords,
     Tabs,
     Bookmarks,
@@ -50,6 +51,7 @@ impl SyncEngineId {
     // enforce this.
     pub fn iter() -> impl Iterator<Item = SyncEngineId> {
         [
+            Self::Prefs,
             Self::Passwords,
             Self::Tabs,
             Self::Bookmarks,
@@ -69,6 +71,7 @@ impl SyncEngineId {
             Self::Tabs => "tabs",
             Self::Addresses => "addresses",
             Self::CreditCards => "creditcards",
+            Self::Prefs => "prefs",
         }
     }
 }
@@ -90,6 +93,7 @@ impl TryFrom<&str> for SyncEngineId {
             "tabs" => Ok(Self::Tabs),
             "addresses" => Ok(Self::Addresses),
             "creditcards" => Ok(Self::CreditCards),
+            "prefs" => Ok(Self::Prefs),
             _ => Err(value.into()),
         }
     }
@@ -242,12 +246,28 @@ mod test {
             engines
         }
         assert_eq!(
-            vec![SyncEngineId::Passwords, SyncEngineId::Tabs],
-            sorted(vec![SyncEngineId::Passwords, SyncEngineId::Tabs])
+            vec![
+                SyncEngineId::Prefs,
+                SyncEngineId::Passwords,
+                SyncEngineId::Tabs
+            ],
+            sorted(vec![
+                SyncEngineId::Prefs,
+                SyncEngineId::Passwords,
+                SyncEngineId::Tabs
+            ])
         );
         assert_eq!(
-            vec![SyncEngineId::Passwords, SyncEngineId::Tabs],
-            sorted(vec![SyncEngineId::Tabs, SyncEngineId::Passwords])
+            vec![
+                SyncEngineId::Prefs,
+                SyncEngineId::Passwords,
+                SyncEngineId::Tabs
+            ],
+            sorted(vec![
+                SyncEngineId::Tabs,
+                SyncEngineId::Passwords,
+                SyncEngineId::Prefs
+            ])
         );
     }
 

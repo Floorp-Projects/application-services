@@ -115,6 +115,7 @@ interface SyncManager {
     [Throws=SyncManagerError]
     SyncResult sync(SyncParams params);
 
-    /// Get a list of engine names available for syncing
+    /// Get ordinary engine names available for toggle-driven syncing. Special
+    /// shared transports such as Floorp prefs are intentionally omitted.
     sequence<string> get_available_engines();
 };
