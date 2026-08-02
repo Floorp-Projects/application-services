@@ -88,6 +88,12 @@ fi
 if [[ -n "${RUSTUP_TOOLCHAIN:-}" ]]; then
   RUST_TOOLCHAIN_ENV+=(RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN")
 fi
+if [[ -n "${CARGO_NET_OFFLINE:-}" ]]; then
+  RUST_TOOLCHAIN_ENV+=(CARGO_NET_OFFLINE="$CARGO_NET_OFFLINE")
+fi
+if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+  RUST_TOOLCHAIN_ENV+=(SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH")
+fi
 if [[ "$IS_MONOREPO" == "true" ]]; then
 LIBS_ROOT_DIR=$REPO_ROOT/third_party/application-services
 else
@@ -95,7 +101,7 @@ LIBS_ROOT_DIR=$REPO_ROOT
 fi
 
 DEFAULT_RUSTFLAGS=""
-BUILD_ARGS=(build --manifest-path "$MANIFEST_PATH" --lib)
+BUILD_ARGS=(build --locked --manifest-path "$MANIFEST_PATH" --lib)
 case $BUILD_PROFILE in
   debug) ;;
   release)
@@ -234,4 +240,10 @@ rm -rf "$XCFRAMEWORK_ROOT/common"
 
 # Zip it all up into a bundle for distribution.
 
-(cd "$WORKING_DIR" && zip -9 -r "$FRAMEWORK_FILENAME.xcframework.zip" "$FRAMEWORK_FILENAME.xcframework")
+ZIP_ARGS=(-9 -r)
+if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+  ARCHIVE_TIMESTAMP=$(date -u -r "$SOURCE_DATE_EPOCH" '+%Y%m%d%H%M.%S')
+  find "$XCFRAMEWORK_ROOT" -exec touch -h -t "$ARCHIVE_TIMESTAMP" {} +
+  ZIP_ARGS=(-X -9 -r)
+fi
+(cd "$WORKING_DIR" && zip "${ZIP_ARGS[@]}" "$FRAMEWORK_FILENAME.xcframework.zip" "$FRAMEWORK_FILENAME.xcframework")

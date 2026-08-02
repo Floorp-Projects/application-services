@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "distribution_repository": "Floorp-Projects/application-services",
+  "release_tag_pattern": "^floorp-ios-155\\.20260731050244\\.[1-9][0-9]*$",
+  "release_tag_example": "floorp-ios-155.20260731050244.1",
+  "upstream": {
+    "repository": "mozilla/application-services",
+    "commit": "b21da19867ff58b1cfd8c83fceba8dac1f243c44",
+    "source_version": "155.0a1",
+    "artifact_version": "155.0.20260731050244"
+  },
+  "toolchain": {
+    "xcode": "26.3",
+    "python": "3.12.13",
+    "rust": "1.91.0",
+    "rustup_init": {
+      "version": "1.27.0",
+      "aarch64_apple_darwin_sha256": "c30c180297a0053dcb8932ed43d365f0c9005abd847375f7ed5799a761ea81e5",
+      "x86_64_unknown_linux_gnu_sha256": "a3d541a5484c8fa2f1c21478a6f6c505a778d473c21d60a18a4df5185d320ef8"
+    },
+    "ninja": {
+      "version": "1.13.2",
+      "macos_sha256": "c99048673aa765960a99cf10c6ddb9f1fad506099ff0a0e137ad8960a88f321b",
+      "linux_sha256": "5749cbc4e668273514150a80e387a957f933c6ed3f5f11e03fb30955e2bbead6"
+    },
+    "gyp": {
+      "commit": "1615ec326858f8c2bd8f30b3a86ea71830409ce4",
+      "six_wheel_url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
+      "six_wheel_sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"
+    },
+    "glean_parser": "19.2.0"
+  },
+  "ios": {
+    "deployment_target": "15.0",
+    "device_architectures": [
+      "arm64"
+    ],
+    "simulator_architectures": [
+      "arm64",
+      "x86_64"
+    ]
+  },
+  "nss": {
+    "version": "3.125",
+    "archive": "nss-3.125-with-nspr-4.39.tar.gz",
+    "sha256": "fa3e7dcd151a7f3331a2dbf4cc57bcf4444e4c9c2b67ac00363409a7c4ecfa9d"
+  },
+  "artifacts": [
+    "MozillaRustComponents.xcframework.zip",
+    "FocusRustComponents.xcframework.zip",
+    "swift-components.tar.xz"
+  ],
+  "immutable_releases_required": true
+}

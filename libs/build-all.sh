@@ -6,6 +6,7 @@ NSS="nss-3.125"
 NSS_ARCHIVE="nss-3.125-with-nspr-4.39.tar.gz"
 NSS_URL="https://ftp.mozilla.org/pub/security/nss/releases/NSS_3_125_RTM/src/${NSS_ARCHIVE}"
 NSS_SHA256="fa3e7dcd151a7f3331a2dbf4cc57bcf4444e4c9c2b67ac00363409a7c4ecfa9d"
+readonly NSS NSS_ARCHIVE NSS_URL NSS_SHA256
 
 # End of configuration.
 

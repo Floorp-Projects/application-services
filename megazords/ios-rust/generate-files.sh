@@ -43,7 +43,7 @@ if [[ -z "$CARGO" ]] || [[ ! -x "$CARGO" ]]; then
 fi
 
 UNIFFI_BINDGEN_DIR="$THIS_DIR/../../tools/uniffi-bindgen-library-mode"
-UNIFFI_BINDGEN_COMMAND="$CARGO run --manifest-path=$UNIFFI_BINDGEN_DIR/Cargo.toml --"
+UNIFFI_BINDGEN_COMMAND="$CARGO run --locked --manifest-path=$UNIFFI_BINDGEN_DIR/Cargo.toml --"
 
 # Run uniffi-bindgen-library-mode to generate the files.
 #

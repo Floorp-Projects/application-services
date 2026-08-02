@@ -176,10 +176,24 @@ fi
 VENVDIR="${SOURCE_ROOT}/.venv"
 
 [ -x "${VENVDIR}/bin/python" ] || python3 -m venv "${VENVDIR}"
-# We need at least pip 20.3 for Big Sur support, see https://pip.pypa.io/en/stable/news/#id48
-# Latest pip is 21.0.1
-"${VENVDIR}"/bin/pip install "pip>=20.3"
-"${VENVDIR}"/bin/pip install --upgrade "glean_parser~=$GLEAN_PARSER_VERSION"
+if [[ -n "${GLEAN_PARSER_REQUIREMENTS_FILE:-}" ]]; then
+    if [[ ! -f "${GLEAN_PARSER_REQUIREMENTS_FILE}" ]]; then
+        echo "error: Glean Parser requirements file does not exist: ${GLEAN_PARSER_REQUIREMENTS_FILE}" >&2
+        exit 2
+    fi
+    # Release automation supplies an exact, reviewed dependency set. Do not
+    # upgrade pip or resolve a moving compatible-version range in this mode.
+    "${VENVDIR}"/bin/python -m pip install \
+        --disable-pip-version-check \
+        --require-hashes \
+        --only-binary=:all: \
+        --requirement "${GLEAN_PARSER_REQUIREMENTS_FILE}"
+else
+    # We need at least pip 20.3 for Big Sur support, see https://pip.pypa.io/en/stable/news/#id48
+    # Latest pip is 21.0.1
+    "${VENVDIR}"/bin/pip install "pip>=20.3"
+    "${VENVDIR}"/bin/pip install --upgrade "glean_parser~=$GLEAN_PARSER_VERSION"
+fi
 
 # Run the glinter
 # Turn its warnings into warnings visible in Xcode (but don't do for the success message)

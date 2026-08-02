@@ -96,6 +96,17 @@ def generate_glean_metrics(args):
         "LANG": "C.UTF-8",
         "PATH": os.environ["PATH"],
     }
+    for name in (
+        "GLEAN_PARSER_REQUIREMENTS_FILE",
+        "PIP_CACHE_DIR",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_NO_INPUT",
+    ):
+        if name in os.environ:
+            env[name] = os.environ[name]
+    generator_args = []
+    if build_date := os.environ.get("GLEAN_BUILD_DATE"):
+        generator_args.extend(["--build-date", build_date])
     glean_script = (
         ROOT_DIR / "tools/sdk_generator.sh"
     )
@@ -119,16 +130,20 @@ def generate_glean_metrics(args):
             ROOT_DIR / "components/sync_manager/pings.yaml",
         ],
     )
-    generate_glean_metrics_for_target(env, glean_script, out_dir, firefox_glean_files)
     generate_glean_metrics_for_target(
-        env, glean_script, focus_out_dir, focus_glean_files
+        env, glean_script, out_dir, firefox_glean_files, generator_args
+    )
+    generate_glean_metrics_for_target(
+        env, glean_script, focus_out_dir, focus_glean_files, generator_args
     )
 
 
-def generate_glean_metrics_for_target(env, glean_script, out_dir, input_files):
+def generate_glean_metrics_for_target(
+    env, glean_script, out_dir, input_files, generator_args
+):
     ensure_dir(out_dir)
     subprocess.check_call(
-        [str(glean_script), "-o", str(out_dir), *input_files], env=env
+        [str(glean_script), "-o", str(out_dir), *generator_args, *input_files], env=env
     )
 
 

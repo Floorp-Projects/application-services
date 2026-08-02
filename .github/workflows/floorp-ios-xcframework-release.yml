@@ -1,0 +1,542 @@
+name: Release Floorp iOS XCFramework
+
+on:
+  push:
+    tags:
+      - "floorp-ios-*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing protected lightweight tag; dispatch from this same tag ref
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: floorp-ios-xcframework-release-${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate protected release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      upstream_merge_base: ${{ steps.release.outputs.upstream_merge_base }}
+      python_version: ${{ steps.release.outputs.python_version }}
+      xcode_version: ${{ steps.release.outputs.xcode_version }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and validate release source
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          PUSH_RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            release_tag="$PUSH_RELEASE_TAG"
+          else
+            release_tag="$INPUT_RELEASE_TAG"
+          fi
+
+          expected_ref="refs/tags/$release_tag"
+          if [[ "$EVENT_REF" != "$expected_ref" ]]; then
+            echo "Run this workflow from the release tag itself: expected $expected_ref, got $EVENT_REF" >&2
+            exit 1
+          fi
+          git show-ref --verify --quiet "refs/tags/$release_tag"
+          tag_object_sha="$(git rev-parse "refs/tags/$release_tag")"
+          if [[ "$(git cat-file -t "$tag_object_sha")" != "commit" ]]; then
+            echo "Floorp release tags must be lightweight commit tags" >&2
+            exit 1
+          fi
+          source_sha="$(git rev-list -n 1 "$release_tag")"
+          test "$source_sha" = "$(git rev-parse HEAD)"
+          if [[ "$EVENT_SHA" != "$source_sha" ]]; then
+            echo "Event SHA $EVENT_SHA does not match release source $source_sha" >&2
+            exit 1
+          fi
+
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            +refs/heads/floorp-ios:refs/remotes/origin/floorp-ios
+          git merge-base --is-ancestor "$source_sha" origin/floorp-ios
+          first_parent_history="$RUNNER_TEMP/floorp-ios-first-parent.txt"
+          git rev-list --first-parent origin/floorp-ios > "$first_parent_history"
+          python3 - "$first_parent_history" "$source_sha" <<'PY'
+          import pathlib
+          import sys
+
+          history = pathlib.Path(sys.argv[1]).read_text().splitlines()
+          if sys.argv[2] not in history:
+              raise SystemExit(
+                  "release source was never a protected floorp-ios mainline commit"
+              )
+          PY
+
+          configured_upstream="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["upstream"]["commit"])')"
+          actual_merge_base="$(git merge-base --all "$source_sha" origin/main)"
+          if [[ "$actual_merge_base" != "$configured_upstream" ]]; then
+            echo "Expected exact upstream merge-base $configured_upstream, found ${actual_merge_base:-none}" >&2
+            exit 1
+          fi
+
+          python3 automation/floorp/verify-ios-xcframework-release.py \
+            --release-tag "$release_tag" \
+            --source-commit "$source_sha" \
+            --repository "$RELEASE_REPOSITORY" \
+            --upstream-ref origin/main \
+            --source-only
+
+          python_version="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["toolchain"]["python"])')"
+          xcode_version="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["toolchain"]["xcode"])')"
+          {
+            echo "release_tag=$release_tag"
+            echo "source_sha=$source_sha"
+            echo "upstream_merge_base=$actual_merge_base"
+            echo "python_version=$python_version"
+            echo "xcode_version=$xcode_version"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build release from source
+    needs: prepare
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out immutable source commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure isolated Rust homes
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/floorp-cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/floorp-rustup" >> "$GITHUB_ENV"
+
+      - name: Fetch protected release and upstream mirror references
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            +refs/heads/floorp-ios:refs/remotes/origin/floorp-ios
+          git merge-base --is-ancestor \
+            "${{ needs.prepare.outputs.source_sha }}" origin/floorp-ios
+          first_parent_history="$RUNNER_TEMP/floorp-ios-first-parent.txt"
+          git rev-list --first-parent origin/floorp-ios > "$first_parent_history"
+          python3 - \
+            "$first_parent_history" "${{ needs.prepare.outputs.source_sha }}" <<'PY'
+          import pathlib
+          import sys
+
+          if sys.argv[2] not in pathlib.Path(sys.argv[1]).read_text().splitlines():
+              raise SystemExit("release source left the floorp-ios mainline history")
+          PY
+          test "$(git merge-base "${{ needs.prepare.outputs.source_sha }}" origin/main)" = \
+            "${{ needs.prepare.outputs.upstream_merge_base }}"
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ needs.prepare.outputs.python_version }}
+
+      - name: Select pinned Xcode
+        run: |
+          sudo xcode-select --switch "/Applications/Xcode_${{ needs.prepare.outputs.xcode_version }}.app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install pinned Rust toolchain
+        run: automation/floorp/install-rust-toolchain.sh
+
+      - name: Install pinned Ninja and GYP
+        run: automation/floorp/install-native-build-tools.sh
+
+      - name: Build and verify release artifacts
+        env:
+          FLOORP_IOS_UPSTREAM_REF: origin/main
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          automation/floorp/build-ios-xcframework-release.sh \
+            "$RUNNER_TEMP/floorp-ios-release" \
+            "${{ needs.prepare.outputs.release_tag }}" \
+            "${{ needs.prepare.outputs.source_sha }}" \
+            "$GITHUB_REPOSITORY" \
+            "$WORKFLOW_URL"
+
+      - name: Upload release inputs for isolated attest and publish jobs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: floorp-ios-release-${{ needs.prepare.outputs.source_sha }}
+          path: ${{ runner.temp }}/floorp-ios-release
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+  attest:
+    name: Attest verified release assets
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download release inputs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: floorp-ios-release-${{ needs.prepare.outputs.source_sha }}
+          path: ${{ runner.temp }}/floorp-ios-release
+
+      - name: Verify checksums before attestation
+        working-directory: ${{ runner.temp }}/floorp-ios-release
+        run: sha256sum --check SHA256SUMS
+
+      - name: Generate build provenance attestations
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/floorp-ios-release/MozillaRustComponents.xcframework.zip
+            ${{ runner.temp }}/floorp-ios-release/FocusRustComponents.xcframework.zip
+            ${{ runner.temp }}/floorp-ios-release/swift-components.tar.xz
+            ${{ runner.temp }}/floorp-ios-release/release-manifest.json
+            ${{ runner.temp }}/floorp-ios-release/SHA256SUMS
+
+  publish:
+    name: Publish immutable GitHub release
+    needs: [prepare, build, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: floorp-xcframework-release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download attested release inputs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: floorp-ios-release-${{ needs.prepare.outputs.source_sha }}
+          path: ${{ runner.temp }}/floorp-ios-release
+
+      - name: Verify release metadata
+        env:
+          ASSET_DIR: ${{ runner.temp }}/floorp-ios-release
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          UPSTREAM_MERGE_BASE: ${{ needs.prepare.outputs.upstream_merge_base }}
+        run: |
+          cd "$ASSET_DIR"
+          sha256sum --check SHA256SUMS
+          python3 - \
+            "$RELEASE_TAG" "$SOURCE_SHA" "$GITHUB_REPOSITORY" \
+            "$UPSTREAM_MERGE_BASE" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path("release-manifest.json").read_text())
+          if manifest["release_tag"] != sys.argv[1]:
+              raise SystemExit("release tag mismatch")
+          if manifest["source"]["commit"] != sys.argv[2]:
+              raise SystemExit("release source mismatch")
+          if manifest["repository"] != sys.argv[3]:
+              raise SystemExit("release repository mismatch")
+          if manifest["upstream"]["actual_merge_base"] != sys.argv[4]:
+              raise SystemExit("actual upstream merge-base mismatch")
+          if manifest["upstream"]["reference"] != "origin/main":
+              raise SystemExit("upstream reference mismatch")
+          if manifest["immutable_release_required"] is not True:
+              raise SystemExit("immutable release requirement is absent")
+          PY
+
+      - name: Fail closed unless protected release controls are active
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMMUTABLE_SETTINGS_TOKEN: ${{ secrets.FLOORP_RELEASE_ADMIN_READ_TOKEN }}
+          RELEASE_ENVIRONMENT_GUARD: ${{ vars.FLOORP_XCFRAMEWORK_RELEASE_GUARD }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          if [[ "$RELEASE_ENVIRONMENT_GUARD" != "required-review-v1" ]]; then
+            echo "The protected floorp-xcframework-release environment is not configured" >&2
+            exit 1
+          fi
+          if [[ -z "$IMMUTABLE_SETTINGS_TOKEN" ]]; then
+            echo "The protected environment has no immutable-settings read token" >&2
+            exit 1
+          fi
+
+          environment_json="$RUNNER_TEMP/github-release-environment.json"
+          if ! GH_TOKEN="$IMMUTABLE_SETTINGS_TOKEN" gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/environments/floorp-xcframework-release" \
+            > "$environment_json"; then
+            echo "Unable to verify the protected release environment" >&2
+            exit 1
+          fi
+          python3 - "$environment_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          environment = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if environment.get("name") != "floorp-xcframework-release":
+              raise SystemExit("release environment name mismatch")
+          reviewer_rules = [
+              rule
+              for rule in environment.get("protection_rules", [])
+              if rule.get("type") == "required_reviewers"
+          ]
+          if len(reviewer_rules) != 1 or not reviewer_rules[0].get("reviewers"):
+              raise SystemExit("release environment has no required reviewer")
+          if not isinstance(reviewer_rules[0].get("prevent_self_review"), bool):
+              raise SystemExit("release environment self-review policy is missing")
+          branch_policy = environment.get("deployment_branch_policy")
+          if branch_policy != {
+              "protected_branches": False,
+              "custom_branch_policies": True,
+          }:
+              raise SystemExit(
+                  "release environment must use selected branch and tag policies"
+              )
+          PY
+
+          policy_json="$RUNNER_TEMP/github-release-environment-policies.json"
+          if ! GH_TOKEN="$IMMUTABLE_SETTINGS_TOKEN" gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/environments/floorp-xcframework-release/deployment-branch-policies?per_page=100" \
+            > "$policy_json"; then
+            echo "Unable to verify the release environment tag policy" >&2
+            exit 1
+          fi
+          python3 - "$policy_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          policies = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          expected = [{"name": "floorp-ios-*", "type": "tag"}]
+          actual = [
+              {"name": item.get("name"), "type": item.get("type")}
+              for item in policies.get("branch_policies", [])
+          ]
+          if policies.get("total_count") != 1 or actual != expected:
+              raise SystemExit(
+                  f"release environment tag policies differ: {actual!r}"
+              )
+          PY
+
+          remote_tag_json="$RUNNER_TEMP/github-release-tag.json"
+          gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$remote_tag_json"
+          python3 - "$remote_tag_json" "$RELEASE_TAG" "$SOURCE_SHA" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          tag = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if tag.get("ref") != f"refs/tags/{sys.argv[2]}":
+              raise SystemExit("remote release tag name mismatch")
+          target = tag.get("object", {})
+          if target.get("type") != "commit" or target.get("sha") != sys.argv[3]:
+              raise SystemExit("remote release tag moved or is not a lightweight commit tag")
+          PY
+
+          immutable_json="$RUNNER_TEMP/github-immutable-releases.json"
+          if ! GH_TOKEN="$IMMUTABLE_SETTINGS_TOKEN" gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" > "$immutable_json"; then
+            echo "Unable to verify immutable releases; refusing all release mutations" >&2
+            exit 1
+          fi
+          python3 - "$immutable_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          setting = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if setting.get("enabled") is not True:
+              raise SystemExit("repository release immutability is not enabled")
+          PY
+
+      - name: Publish or verify the immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMMUTABLE_SETTINGS_TOKEN: ${{ secrets.FLOORP_RELEASE_ADMIN_READ_TOKEN }}
+          ASSET_DIR: ${{ runner.temp }}/floorp-ios-release
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          remote_json="$RUNNER_TEMP/github-release.json"
+          probe_response="$RUNNER_TEMP/github-release-probe.txt"
+
+          set +e
+          gh api --include \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            > "$probe_response" 2>&1
+          probe_exit=$?
+          set -e
+          probe_http="$(awk 'NR == 1 { print $2 }' "$probe_response")"
+
+          if [[ "$probe_exit" -eq 0 && "$probe_http" == "200" ]]; then
+            gh api \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$remote_json"
+            release_mode="$(python3 - "$remote_json" "$RELEASE_TAG" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if release.get("tag_name") != sys.argv[2]:
+              raise SystemExit("existing release tag mismatch")
+          if release.get("prerelease") is not True:
+              raise SystemExit("existing release is not a prerelease")
+          print("draft" if release.get("draft") is True else "published")
+          PY
+            )"
+          elif [[ "$probe_http" == "404" ]]; then
+            release_mode="absent"
+          else
+            cat "$probe_response" >&2
+            echo "Unable to determine existing release state" >&2
+            exit 1
+          fi
+
+          verify_release_assets() {
+            local expected_mode="$1"
+            python3 - "$remote_json" "$ASSET_DIR" "$RELEASE_TAG" "$expected_mode" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assets = pathlib.Path(sys.argv[2])
+          release_tag = sys.argv[3]
+          expected_mode = sys.argv[4]
+          expected_names = {
+              "MozillaRustComponents.xcframework.zip",
+              "FocusRustComponents.xcframework.zip",
+              "swift-components.tar.xz",
+              "release-manifest.json",
+              "SHA256SUMS",
+          }
+
+          if release.get("tag_name") != release_tag:
+              raise SystemExit("release tag mismatch")
+          if release.get("prerelease") is not True:
+              raise SystemExit("release is not marked as a prerelease")
+          if expected_mode == "draft":
+              if release.get("draft") is not True:
+                  raise SystemExit("release is no longer a draft")
+          elif expected_mode == "published":
+              if release.get("draft") is not False:
+                  raise SystemExit("release is still a draft")
+              if release.get("immutable") is not True:
+                  raise SystemExit("published release is not immutable")
+          else:
+              raise SystemExit(f"unexpected release verification mode: {expected_mode}")
+
+          remote = {asset["name"]: asset.get("digest") for asset in release["assets"]}
+          if set(remote) != expected_names:
+              raise SystemExit(f"unexpected remote assets: {sorted(remote)}")
+          for name in sorted(expected_names):
+              expected = "sha256:" + hashlib.sha256((assets / name).read_bytes()).hexdigest()
+              if remote[name] != expected:
+                  raise SystemExit(f"GitHub digest mismatch for {name}")
+          PY
+          }
+
+          if [[ "$release_mode" == "published" ]]; then
+            verify_release_assets published
+            echo "Existing immutable release $RELEASE_TAG matches every verified asset." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [[ "$release_mode" == "absent" ]]; then
+            notes="$RUNNER_TEMP/release-notes.md"
+            {
+              echo "Floorp iOS Application Services build."
+              echo
+              echo "- Source: \`$SOURCE_SHA\`"
+              echo "- Upstream and toolchain provenance: \`release-manifest.json\`"
+              echo "- Verification: \`SHA256SUMS\` and GitHub artifact attestations"
+              echo
+              echo "This release must show as Immutable after publication."
+            } > "$notes"
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --draft \
+              --prerelease \
+              --title "Floorp iOS Application Services $RELEASE_TAG" \
+              --notes-file "$notes"
+          fi
+
+          gh release upload "$RELEASE_TAG" --clobber \
+            "$ASSET_DIR/MozillaRustComponents.xcframework.zip" \
+            "$ASSET_DIR/FocusRustComponents.xcframework.zip" \
+            "$ASSET_DIR/swift-components.tar.xz" \
+            "$ASSET_DIR/release-manifest.json" \
+            "$ASSET_DIR/SHA256SUMS"
+
+          gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$remote_json"
+          verify_release_assets draft
+
+          # Reduce tag and setting drift windows between preflight and publication.
+          remote_tag_json="$RUNNER_TEMP/github-release-tag-before-publish.json"
+          gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$remote_tag_json"
+          python3 - "$remote_tag_json" "$SOURCE_SHA" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          target = json.loads(pathlib.Path(sys.argv[1]).read_text()).get("object", {})
+          if target.get("type") != "commit" or target.get("sha") != sys.argv[2]:
+              raise SystemExit("remote release tag changed before publication")
+          PY
+
+          immutable_json="$RUNNER_TEMP/github-immutable-releases-before-publish.json"
+          GH_TOKEN="$IMMUTABLE_SETTINGS_TOKEN" gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" > "$immutable_json"
+          python3 - "$immutable_json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          if json.loads(pathlib.Path(sys.argv[1]).read_text()).get("enabled") is not True:
+              raise SystemExit("repository release immutability changed before publication")
+          PY
+
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease
+          gh api \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$remote_json"
+          verify_release_assets published
+          echo "Published and verified immutable release $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"

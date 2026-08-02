@@ -1,0 +1,287 @@
+name: Floorp iOS XCFramework CI
+
+on:
+  pull_request:
+    branches: [floorp-ios]
+  push:
+    branches: [floorp-ios]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: floorp-ios-xcframework-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Classify Floorp iOS changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run_expensive: ${{ steps.changes.outputs.run_expensive }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether native builds are required
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          run_expensive=true
+          if [[ "$EVENT_NAME" != "workflow_dispatch" ]]; then
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              diff_base="$BASE_SHA"
+              diff_head="$HEAD_SHA"
+            elif [[ -n "$BEFORE_SHA" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+              diff_base="$BEFORE_SHA"
+              diff_head="$HEAD_SHA"
+            else
+              diff_base=""
+              diff_head=""
+            fi
+
+            if [[ -n "$diff_base" && -n "$diff_head" ]]; then
+              run_expensive="$(
+                git diff --no-renames --name-only "$diff_base" "$diff_head" \
+                  | python3 automation/floorp/classify-ios-xcframework-changes.py
+              )"
+            fi
+          fi
+          echo "run_expensive=$run_expensive" >> "$GITHUB_OUTPUT"
+
+  static-validation:
+    name: Validate Floorp release automation
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate source metadata and syntax
+        env:
+          DISTRIBUTION_REPOSITORY: Floorp-Projects/application-services
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          release_tag="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["release_tag_example"])')"
+          python3 automation/floorp/verify-ios-xcframework-release.py \
+            --release-tag "$release_tag" \
+            --source-commit "$(git rev-parse HEAD)" \
+            --repository "$DISTRIBUTION_REPOSITORY" \
+            --upstream-ref origin/main \
+            --source-only
+          python3 -m compileall -q \
+            automation/floorp/classify-ios-xcframework-changes.py \
+            automation/floorp/verify-ios-xcframework-release.py \
+            taskcluster/scripts/build-and-test-swift.py
+          python3 -m unittest discover -s automation/floorp/tests
+          bash -n automation/floorp/*.sh megazords/ios-rust/*.sh tools/sdk_generator.sh
+          python3 -m json.tool automation/floorp/ios-xcframework-release-config.json >/dev/null
+
+      - name: Install pinned workflow linters
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          SHELLCHECK_VERSION: 0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          actionlint_archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "$actionlint_archive"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$actionlint_archive" | sha256sum --check
+          tar -xzf "$actionlint_archive" -C "$RUNNER_TEMP" actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+          shellcheck_archive="$RUNNER_TEMP/shellcheck.tar.xz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            --output "$shellcheck_archive"
+          printf '%s  %s\n' "$SHELLCHECK_SHA256" "$shellcheck_archive" | sha256sum --check
+          tar -xJf "$shellcheck_archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Lint workflows and release shell scripts
+        run: |
+          actionlint .github/workflows/floorp-ios-xcframework-ci.yml \
+            .github/workflows/floorp-ios-xcframework-release.yml
+          shellcheck --external-sources automation/floorp/*.sh \
+            megazords/ios-rust/build-xcframework.sh \
+            megazords/ios-rust/generate-files.sh \
+            tools/sdk_generator.sh
+
+  rust-contracts:
+    name: Test Floorp Sync contracts
+    needs: [changes, static-validation]
+    if: needs.changes.outputs.run_expensive == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NSS_DIR: ${{ github.workspace }}/libs/desktop/linux-x86-64/nss
+      NSS_STATIC: "1"
+      CI: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure isolated Rust homes
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/floorp-cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/floorp-rustup" >> "$GITHUB_ENV"
+
+      - name: Install host build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang libclang-dev python3-venv tcl zlib1g-dev
+
+      - name: Install pinned Rust toolchain
+        run: automation/floorp/install-rust-toolchain.sh
+
+      - name: Install pinned Ninja and GYP
+        run: automation/floorp/install-native-build-tools.sh
+
+      - name: Restore desktop NSS cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: libs/desktop/linux-x86-64/nss
+          key: floorp-nss-desktop-${{ runner.os }}-${{ hashFiles('automation/floorp/ios-xcframework-release-config.json', 'libs/**') }}
+
+      - name: Verify or build desktop NSS
+        run: ./libs/verify-desktop-environment.sh
+
+      - name: Check formatting and lints
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked \
+            --package floorp-prefs-sync \
+            --package sync_manager \
+            --package megazord_ios \
+            --all-targets -- -D warnings
+
+      - name: Run Floorp engine and manager tests
+        run: |
+          cargo test --locked --package floorp-prefs-sync
+          cargo test --locked --package sync_manager --tests
+          cargo check --locked --package megazord_ios
+
+  ios-artifacts:
+    name: Build and verify iOS candidate
+    needs: [changes, static-validation]
+    if: needs.changes.outputs.run_expensive == 'true'
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure isolated Rust homes
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/floorp-cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/floorp-rustup" >> "$GITHUB_ENV"
+
+      - name: Fetch exact upstream mirror reference
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+
+      - name: Read pinned build versions
+        id: versions
+        run: |
+          python_version="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["toolchain"]["python"])')"
+          xcode_version="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["toolchain"]["xcode"])')"
+          echo "python=$python_version" >> "$GITHUB_OUTPUT"
+          echo "xcode=$xcode_version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+
+      - name: Select pinned Xcode
+        run: |
+          sudo xcode-select --switch "/Applications/Xcode_${{ steps.versions.outputs.xcode }}.app/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install pinned Rust toolchain
+        run: automation/floorp/install-rust-toolchain.sh
+
+      - name: Install pinned Ninja and GYP
+        run: automation/floorp/install-native-build-tools.sh
+
+      - name: Restore iOS NSS cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: libs/ios
+          key: floorp-nss-ios-${{ runner.os }}-${{ hashFiles('automation/floorp/ios-xcframework-release-config.json', 'libs/**') }}
+
+      - name: Build and verify candidate artifacts
+        env:
+          FLOORP_IOS_UPSTREAM_REF: origin/main
+          RELEASE_REPOSITORY: Floorp-Projects/application-services
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          release_tag="$(python3 -c 'import json; print(json.load(open("automation/floorp/ios-xcframework-release-config.json"))["release_tag_example"])')"
+          automation/floorp/build-ios-xcframework-release.sh \
+            "$RUNNER_TEMP/floorp-ios-candidate" \
+            "$release_tag" \
+            "$(git rev-parse HEAD)" \
+            "$RELEASE_REPOSITORY" \
+            "$WORKFLOW_URL"
+
+      - name: Upload verified candidate
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: floorp-ios-xcframework-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/floorp-ios-candidate
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  required-check:
+    name: Floorp iOS XCFramework required check
+    if: always()
+    needs: [changes, static-validation, rust-contracts, ios-artifacts]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every selected validation job
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          STATIC_RESULT: ${{ needs.static-validation.result }}
+          RUST_RESULT: ${{ needs.rust-contracts.result }}
+          IOS_RESULT: ${{ needs.ios-artifacts.result }}
+          RUN_EXPENSIVE: ${{ needs.changes.outputs.run_expensive }}
+        run: |
+          test "$CHANGES_RESULT" = "success"
+          test "$STATIC_RESULT" = "success"
+          if [[ "$RUN_EXPENSIVE" == "true" ]]; then
+            test "$RUST_RESULT" = "success"
+            test "$IOS_RESULT" = "success"
+          else
+            test "$RUST_RESULT" = "skipped"
+            test "$IOS_RESULT" = "skipped"
+          fi
