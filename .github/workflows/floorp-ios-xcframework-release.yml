@@ -487,6 +487,7 @@ jobs:
               echo "This release must show as Immutable after publication."
             } > "$notes"
             gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
               --prerelease \
@@ -494,7 +495,9 @@ jobs:
               --notes-file "$notes"
           fi
 
-          gh release upload "$RELEASE_TAG" --clobber \
+          gh release upload "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
             "$ASSET_DIR/MozillaRustComponents.xcframework.zip" \
             "$ASSET_DIR/FocusRustComponents.xcframework.zip" \
             "$ASSET_DIR/swift-components.tar.xz" \
@@ -534,7 +537,10 @@ jobs:
               raise SystemExit("repository release immutability changed before publication")
           PY
 
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease
           gh api \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$remote_json"
