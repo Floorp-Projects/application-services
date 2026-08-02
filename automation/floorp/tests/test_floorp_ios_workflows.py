@@ -195,6 +195,20 @@ class FloorpIOSWorkflowTests(unittest.TestCase):
         self.assertIn("Existing immutable release", self.release)
         self.assertNotIn("Refusing to modify an already published release", self.release)
 
+    def test_release_commands_do_not_require_a_local_git_checkout(self):
+        for command in (
+            'gh release create "$RELEASE_TAG"',
+            'gh release upload "$RELEASE_TAG"',
+            'gh release edit "$RELEASE_TAG"',
+        ):
+            command_index = self.release.index(command)
+            next_command_index = self.release.find("\n          gh ", command_index + 1)
+            command_block = self.release[
+                command_index : next_command_index if next_command_index >= 0 else None
+            ]
+            with self.subTest(command=command):
+                self.assertIn('--repo "$GITHUB_REPOSITORY"', command_block)
+
 
 if __name__ == "__main__":
     unittest.main()
