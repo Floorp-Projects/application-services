@@ -325,8 +325,19 @@ class ReleaseVerifierTests(unittest.TestCase):
             self.assertEqual(len(swiftc_calls), 3)
             for wrapper_name, smoke in compiled_sources:
                 self.assertEqual(wrapper_name, "floorp_prefs_sync.swift")
-                self.assertIn("FloorpPrefsSyncStore.Type", smoke)
-                self.assertIn("FloorpPrefsSyncState.Type", smoke)
+                self.assertIn(": FloorpPrefsSyncDelegate", smoke)
+                self.assertIn("FloorpPrefsSyncPrepareInput(", smoke)
+                self.assertIn("FloorpPrefsSyncFinish(", smoke)
+                self.assertIn("FloorpPrefsSyncState(", smoke)
+                self.assertIn(".recordMissing", smoke)
+                self.assertIn(".notesKeyMissing", smoke)
+                self.assertIn(".notesNull", smoke)
+                self.assertIn(".notesString(value:", smoke)
+                self.assertIn(".noUpload(transactionToken:", smoke)
+                self.assertIn(".upload(transactionToken:", smoke)
+                self.assertIn("FloorpPrefsSyncStore(delegate:", smoke)
+                self.assertIn("store.syncState()", smoke)
+                self.assertIn("store.registerWithSyncManager()", smoke)
 
     def test_corrupt_generated_floorp_wrapper_fails_typecheck(self):
         with tempfile.TemporaryDirectory() as directory:

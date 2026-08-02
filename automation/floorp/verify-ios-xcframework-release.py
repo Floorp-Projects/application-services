@@ -687,6 +687,61 @@ def extract_validated_swift_archive(
             shutil.copyfileobj(source, stream)
 
 
+def floorp_generated_binding_smoke_source() -> str:
+    return """import Foundation
+
+private final class FloorpReleasePrefsDelegate: FloorpPrefsSyncDelegate, @unchecked Sendable {
+    func prepare(input: FloorpPrefsSyncPrepareInput) throws -> FloorpPrefsSyncPlan {
+        .noUpload(transactionToken: Data())
+    }
+
+    func syncFinished(finish: FloorpPrefsSyncFinish) throws {}
+
+    func syncStateChanged(state: FloorpPrefsSyncState) throws {}
+
+    func associationReset(state: FloorpPrefsSyncState) throws {}
+}
+
+private func floorpReleaseGeneratedBindingSmoke() throws {
+    let state = FloorpPrefsSyncState(
+        globalSyncId: nil,
+        collectionSyncId: nil,
+        lastModifiedMillis: 0
+    )
+    let remoteStates: [FloorpPrefsRemoteNotes] = [
+        .recordMissing,
+        .notesKeyMissing,
+        .notesNull,
+        .notesString(value: "[]"),
+    ]
+    let input = FloorpPrefsSyncPrepareInput(
+        remoteNotes: remoteStates[0],
+        remoteRecordModifiedMillis: nil,
+        collectionModifiedMillis: 0,
+        maximumNotesValueBytes: 1
+    )
+    let plans: [FloorpPrefsSyncPlan] = [
+        .noUpload(transactionToken: Data()),
+        .upload(transactionToken: Data(), notesValue: "[]"),
+    ]
+    let finish = FloorpPrefsSyncFinish(
+        transactionToken: Data(),
+        didUpload: false,
+        serverModifiedMillis: 0
+    )
+    let delegate: FloorpPrefsSyncDelegate = FloorpReleasePrefsDelegate()
+    _ = try delegate.prepare(input: input)
+    try delegate.syncFinished(finish: finish)
+    try delegate.syncStateChanged(state: state)
+    try delegate.associationReset(state: state)
+    let store = try FloorpPrefsSyncStore(delegate: delegate, initialState: state)
+    _ = store.syncState()
+    store.registerWithSyncManager()
+    _ = plans
+}
+"""
+
+
 def validate_floorp_swift_wrapper(
     swift_archive_path: pathlib.Path,
     xcframework_path: pathlib.Path,
@@ -717,10 +772,7 @@ def validate_floorp_swift_wrapper(
         )
         smoke_path = extraction_root / "FloorpReleaseGeneratedBindingSmoke.swift"
         smoke_path.write_text(
-            "private func floorpReleaseGeneratedBindingSmoke(\n"
-            "    _ store: FloorpPrefsSyncStore.Type,\n"
-            "    _ state: FloorpPrefsSyncState.Type\n"
-            ") {}\n",
+            floorp_generated_binding_smoke_source(),
             encoding="utf-8",
         )
         checked_targets: list[str] = []

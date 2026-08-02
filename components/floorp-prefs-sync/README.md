@@ -42,7 +42,10 @@ Sync/reset/disconnect operation before returning.
 3. `sync_state_changed` persists the successful collection timestamp.
 4. `association_reset` persists new Sync IDs, resets the timestamp, and tells
    the application to invalidate its three-way-merge base without deleting
-local Notes.
+   local Notes. Embedders that require a durable reset during sign-out should
+   call Sync Manager's throwing `disconnect_checked` entry point. The legacy
+   non-throwing `disconnect` API remains available for existing callers and
+   reports persistence failures without returning them.
 
 `maximum_notes_value_bytes` is dynamic: it subtracts the exact aggregate
 framing and every preserved unknown entry from the local cleartext limit. It

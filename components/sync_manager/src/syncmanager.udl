@@ -111,6 +111,11 @@ interface SyncManager {
     /// Disconnect engines from sync, deleting/resetting the sync-related data
     void disconnect();
 
+    /// Disconnect every engine and surface a reset/persistence failure to the
+    /// caller. Prefer this when sign-out must durably clear Sync association.
+    [Throws=SyncManagerError]
+    void disconnect_checked();
+
     /// Perform a sync.  See [SyncParams] and [SyncResult] for details on how this works
     [Throws=SyncManagerError]
     SyncResult sync(SyncParams params);

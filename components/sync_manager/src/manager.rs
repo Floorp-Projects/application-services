@@ -81,27 +81,62 @@ impl SyncManager {
         Ok(())
     }
 
-    /// Disconnect engines from sync, deleting/resetting the sync-related data
-    pub fn disconnect(&self) {
-        breadcrumb!("SyncManager disconnect()");
+    fn disconnect_failures(&self) -> Vec<(SyncEngineId, anyhow::Error)> {
         // A disconnect/reset must not invalidate a prepared prefs transaction
         // after it has returned an outgoing record but before sync15 uploads
         // it. Serialize the complete operation with `sync`.
         let _operation = self.operation.lock();
+        let mut failures = Vec::new();
         for engine_id in SyncEngineId::iter() {
             if let Some(engine) = Self::get_engine(&engine_id) {
                 if let Err(e) = engine.reset(&EngineSyncAssociation::Disconnected) {
-                    error_support::report_error!(
-                        "sync-manager-reset",
-                        "Failed to reset {}: {}",
-                        engine_id,
-                        e
-                    );
+                    failures.push((engine_id, e));
                 }
             } else {
                 warn!("Unable to reset {}, be sure to call register_with_sync_manager before disconnect if this is surprising", engine_id);
             }
         }
+        failures
+    }
+
+    /// Disconnect engines from sync, deleting/resetting the sync-related data.
+    ///
+    /// This legacy entry point reports reset failures but cannot return them to
+    /// its caller. New callers that must persist an association reset should
+    /// use [`Self::disconnect_checked`].
+    pub fn disconnect(&self) {
+        breadcrumb!("SyncManager disconnect()");
+        for (engine_id, error) in self.disconnect_failures() {
+            error_support::report_error!(
+                "sync-manager-reset",
+                "Failed to reset {}: {}",
+                engine_id,
+                error
+            );
+        }
+    }
+
+    /// Disconnect all registered engines and return the first reset failure.
+    ///
+    /// All engines are attempted before this returns. Additional failures are
+    /// still reported so that none are silently discarded.
+    pub fn disconnect_checked(&self) -> Result<()> {
+        breadcrumb!("SyncManager disconnect_checked()");
+        let mut failures = self.disconnect_failures().into_iter();
+        let Some((first_engine, first_error)) = failures.next() else {
+            return Ok(());
+        };
+        for (engine_id, error) in failures {
+            error_support::report_error!(
+                "sync-manager-reset",
+                "Failed to reset {}: {}",
+                engine_id,
+                error
+            );
+        }
+        Err(first_error
+            .context(format!("Failed to reset {first_engine}"))
+            .into())
     }
 
     /// Perform a sync.  See [SyncParams] and [SyncResult] for details on how this works
@@ -344,7 +379,7 @@ impl CommandProcessor for SyncClient {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::time::Duration;
@@ -352,6 +387,7 @@ mod test {
     #[derive(Default)]
     struct PrefsBoundaryDelegate {
         association_resets: AtomicUsize,
+        reject_association_reset: AtomicBool,
     }
 
     impl floorp_prefs_sync::FloorpPrefsSyncDelegate for PrefsBoundaryDelegate {
@@ -381,6 +417,9 @@ mod test {
             _state: floorp_prefs_sync::FloorpPrefsSyncState,
         ) -> floorp_prefs_sync::Result<()> {
             self.association_resets.fetch_add(1, Ordering::Relaxed);
+            if self.reject_association_reset.load(Ordering::Relaxed) {
+                return Err(floorp_prefs_sync::FloorpPrefsSyncError::DelegateRejected);
+            }
             Ok(())
         }
     }
@@ -466,5 +505,25 @@ mod test {
         done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         disconnect.join().unwrap();
         assert!(delegate.association_resets.load(Ordering::Relaxed) == 3);
+
+        // The legacy method remains non-throwing, while the checked API makes
+        // a foreign delegate's persistence rejection visible to Swift.
+        delegate
+            .reject_association_reset
+            .store(true, Ordering::Relaxed);
+        let state_before_failed_disconnect = store.sync_state();
+        let error = manager.disconnect_checked().unwrap_err();
+        let SyncManagerError::AnyhowError(source) = &error else {
+            panic!("unexpected checked disconnect error: {error}");
+        };
+        assert!(source.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<floorp_prefs_sync::FloorpPrefsSyncError>(),
+                Some(floorp_prefs_sync::FloorpPrefsSyncError::DelegateRejected)
+            )
+        }));
+        assert!(error.to_string().contains("Failed to reset prefs"));
+        assert!(delegate.association_resets.load(Ordering::Relaxed) == 4);
+        assert!(store.sync_state() == state_before_failed_disconnect);
     }
 }
