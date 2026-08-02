@@ -553,6 +553,32 @@ Load command 1
                 self.config["upstream"]["commit"],
             )
 
+    def test_main_passes_loaded_config_to_artifact_validation(self):
+        artifacts = pathlib.Path("/tmp/floorp-release-test-artifacts")
+        args = unittest.mock.Mock(
+            config=pathlib.Path("release-config.json"),
+            release_tag="floorp-ios-155.20260731050244.1",
+            source_commit="a" * 40,
+            upstream_ref="origin/main",
+            repository=self.config["distribution_repository"],
+            source_only=False,
+            artifacts=artifacts,
+            write_metadata=False,
+            workflow_url="https://example.invalid/workflow",
+        )
+
+        with unittest.mock.patch.object(VERIFIER, "parse_args", return_value=args), \
+             unittest.mock.patch.object(
+                 VERIFIER, "load_config", return_value=self.config
+             ), unittest.mock.patch.object(
+                 VERIFIER, "validate_source", return_value="b" * 40
+             ), unittest.mock.patch.object(
+                 VERIFIER, "validate_artifacts", return_value={}
+             ) as validate_artifacts, unittest.mock.patch("builtins.print"):
+            VERIFIER.main()
+
+        validate_artifacts.assert_called_once_with(artifacts, self.config)
+
     def test_nss_configuration_rejects_late_override(self):
         build_script = (
             pathlib.Path(__file__).parents[3] / "libs/build-all.sh"

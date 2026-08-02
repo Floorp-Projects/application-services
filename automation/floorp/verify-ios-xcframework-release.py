@@ -882,7 +882,7 @@ def main() -> None:
         print("Floorp iOS release source metadata is valid.")
         return
 
-    artifact_data = validate_artifacts(args.artifacts)
+    artifact_data = validate_artifacts(args.artifacts, config)
     if args.write_metadata:
         write_metadata(
             args.artifacts,
