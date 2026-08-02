@@ -32,7 +32,14 @@ class ReleaseVerifierTests(unittest.TestCase):
         )
 
     def write_xcframework(
-        self, path, root_name, include_floorp, include_modulemap=True
+        self,
+        path,
+        root_name,
+        include_floorp,
+        include_modulemap=True,
+        modulemap_omitted_headers=(),
+        modulemap_extra_headers=(),
+        include_modulemap_export=True,
     ):
         framework_name = "MozillaRustComponents"
         libraries = [
@@ -73,13 +80,38 @@ class ReleaseVerifierTests(unittest.TestCase):
                 archive.writestr(
                     f"{framework_root}/Headers/MozillaRustComponents.h", umbrella
                 )
+                archive.writestr(
+                    f"{framework_root}/Headers/RustViaductFFI.h", b"generated"
+                )
+                archive.writestr(
+                    f"{framework_root}/Headers/nimbusFFI.h", b"generated"
+                )
                 if include_modulemap:
+                    modulemap_headers = ["RustViaductFFI.h"]
+                    if include_floorp:
+                        modulemap_headers.append("floorp_prefs_syncFFI.h")
+                    modulemap_headers.append("nimbusFFI.h")
+                    modulemap_headers = [
+                        header
+                        for header in modulemap_headers
+                        if header not in modulemap_omitted_headers
+                    ]
+                    modulemap_headers.extend(modulemap_extra_headers)
+                    modulemap = "framework module MozillaRustComponents {\n"
+                    modulemap += "".join(
+                        f'  header "{header}"\n' for header in modulemap_headers
+                    )
+                    if include_modulemap_export:
+                        modulemap += "  export *\n"
+                    modulemap += (
+                        '  use "Darwin"\n'
+                        '  use "_Builtin_stdbool"\n'
+                        '  use "_Builtin_stdint"\n'
+                        "}\n"
+                    )
                     archive.writestr(
                         f"{framework_root}/Modules/module.modulemap",
-                        "framework module MozillaRustComponents {\n"
-                        '  umbrella header "MozillaRustComponents.h"\n'
-                        "  export *\n"
-                        "}\n",
+                        modulemap,
                     )
                 if include_floorp:
                     archive.writestr(
@@ -213,6 +245,144 @@ class ReleaseVerifierTests(unittest.TestCase):
                     VERIFIER.validate_xcframework(
                         path, root_name, self.config, require_floorp_binding=True
                     )
+
+    def test_xcframework_requires_floorp_modulemap_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / VERIFIER.MAIN_ARCHIVE
+            root_name = "MozillaRustComponents.xcframework"
+            self.write_xcframework(
+                path,
+                root_name,
+                include_floorp=True,
+                modulemap_omitted_headers=("floorp_prefs_syncFFI.h",),
+            )
+            with unittest.mock.patch.object(
+                VERIFIER,
+                "inspect_binary",
+                side_effect=lambda binary, _runner_temp: self.inspection(binary),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "missing required headers.*floorp_prefs_syncFFI"
+                ):
+                    VERIFIER.validate_xcframework(
+                        path, root_name, self.config, require_floorp_binding=True
+                    )
+
+    def test_xcframework_rejects_missing_modulemap_header_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / VERIFIER.MAIN_ARCHIVE
+            root_name = "MozillaRustComponents.xcframework"
+            self.write_xcframework(
+                path,
+                root_name,
+                include_floorp=True,
+                modulemap_extra_headers=("missingFFI.h",),
+            )
+            with unittest.mock.patch.object(
+                VERIFIER,
+                "inspect_binary",
+                side_effect=lambda binary, _runner_temp: self.inspection(binary),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "references missing headers.*missingFFI"
+                ):
+                    VERIFIER.validate_xcframework(
+                        path, root_name, self.config, require_floorp_binding=True
+                    )
+
+    def test_xcframework_requires_rust_viaduct_modulemap_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / VERIFIER.MAIN_ARCHIVE
+            root_name = "MozillaRustComponents.xcframework"
+            self.write_xcframework(
+                path,
+                root_name,
+                include_floorp=True,
+                modulemap_omitted_headers=("RustViaductFFI.h",),
+            )
+            with unittest.mock.patch.object(
+                VERIFIER,
+                "inspect_binary",
+                side_effect=lambda binary, _runner_temp: self.inspection(binary),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "missing required headers.*RustViaductFFI"
+                ):
+                    VERIFIER.validate_xcframework(
+                        path, root_name, self.config, require_floorp_binding=True
+                    )
+
+    def test_xcframework_requires_modulemap_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / VERIFIER.MAIN_ARCHIVE
+            root_name = "MozillaRustComponents.xcframework"
+            self.write_xcframework(
+                path,
+                root_name,
+                include_floorp=True,
+                include_modulemap_export=False,
+            )
+            with unittest.mock.patch.object(
+                VERIFIER,
+                "inspect_binary",
+                side_effect=lambda binary, _runner_temp: self.inspection(binary),
+            ):
+                with self.assertRaisesRegex(ValueError, "does not export"):
+                    VERIFIER.validate_xcframework(
+                        path, root_name, self.config, require_floorp_binding=True
+                    )
+
+    def test_focus_xcframework_rejects_floorp_modulemap_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / VERIFIER.FOCUS_ARCHIVE
+            root_name = "FocusRustComponents.xcframework"
+            self.write_xcframework(
+                path,
+                root_name,
+                include_floorp=False,
+                modulemap_extra_headers=("floorp_prefs_syncFFI.h",),
+            )
+            with unittest.mock.patch.object(
+                VERIFIER,
+                "inspect_binary",
+                side_effect=lambda binary, _runner_temp: self.inspection(
+                    binary, include_floorp=False
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "Focus modulemap unexpectedly contains"
+                ):
+                    VERIFIER.validate_xcframework(
+                        path, root_name, self.config, require_floorp_binding=False
+                    )
+
+    def test_focus_xcframework_accepts_generated_modulemap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / VERIFIER.FOCUS_ARCHIVE
+            root_name = "FocusRustComponents.xcframework"
+            self.write_xcframework(path, root_name, include_floorp=False)
+            with unittest.mock.patch.object(
+                VERIFIER,
+                "inspect_binary",
+                side_effect=lambda binary, _runner_temp: self.inspection(
+                    binary, include_floorp=False
+                ),
+            ), unittest.mock.patch.object(
+                VERIFIER,
+                "validate_swift_imports",
+                return_value=[
+                    "arm64-apple-ios15.0",
+                    "arm64-apple-ios15.0-simulator",
+                    "x86_64-apple-ios15.0-simulator",
+                ],
+            ), unittest.mock.patch.object(
+                VERIFIER, "run", return_value=VERIFIER.sha256(path)
+            ):
+                result = VERIFIER.validate_xcframework(
+                    path, root_name, self.config, require_floorp_binding=False
+                )
+
+            self.assertEqual(result["sha256"], VERIFIER.sha256(path))
 
     def test_xcframework_rejects_newer_deployment_target(self):
         with tempfile.TemporaryDirectory() as directory:

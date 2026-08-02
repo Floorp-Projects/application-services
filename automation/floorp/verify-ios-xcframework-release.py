@@ -476,15 +476,51 @@ def inspect_binary(binary: bytes, runner_temp: str | None) -> dict[str, Any]:
     }
 
 
-def validate_modulemap(modulemap: str) -> None:
-    if not re.search(
-        r"\b(?:framework\s+)?module\s+MozillaRustComponents\b", modulemap
-    ):
+def validate_modulemap(
+    modulemap: str,
+    archive_names: set[str],
+    framework_root: str,
+    require_floorp_binding: bool,
+) -> None:
+    module = re.fullmatch(
+        r"\s*framework\s+module\s+MozillaRustComponents\s*\{"
+        r"(?P<body>[^{}]*)\}\s*",
+        modulemap,
+    )
+    if module is None:
         raise ValueError("modulemap does not define MozillaRustComponents")
-    if not re.search(
-        r'\bumbrella\s+header\s+"MozillaRustComponents\.h"', modulemap
-    ):
-        raise ValueError("modulemap does not use MozillaRustComponents.h")
+    body = module.group("body")
+    if not re.search(r"(?m)^\s*export\s+\*\s*$", body):
+        raise ValueError("modulemap does not export its headers")
+
+    direct_headers = re.findall(r'(?m)^\s*header\s+"([^\r\n"]+)"\s*$', body)
+    if len(direct_headers) != len(set(direct_headers)):
+        raise ValueError("modulemap contains duplicate header declarations")
+    required_headers = {"RustViaductFFI.h"}
+    floorp_header = "floorp_prefs_syncFFI.h"
+    if require_floorp_binding:
+        required_headers.add(floorp_header)
+    elif floorp_header in direct_headers:
+        raise ValueError("Focus modulemap unexpectedly contains Floorp preferences FFI")
+
+    missing_required = sorted(required_headers - set(direct_headers))
+    if missing_required:
+        raise ValueError(f"modulemap is missing required headers: {missing_required}")
+
+    unsafe_headers = sorted(
+        header
+        for header in direct_headers
+        if header.endswith("/") or not safe_archive_name(header)
+    )
+    if unsafe_headers:
+        raise ValueError(f"modulemap contains unsafe header paths: {unsafe_headers}")
+    missing_headers = sorted(
+        header
+        for header in direct_headers
+        if f"{framework_root}/Headers/{header}" not in archive_names
+    )
+    if missing_headers:
+        raise ValueError(f"modulemap references missing headers: {missing_headers}")
 
 
 def validate_swift_imports(
@@ -615,7 +651,12 @@ def validate_xcframework(
                 expected_platform,
                 config["ios"]["deployment_target"],
             )
-            validate_modulemap(archive.read(modulemap_name).decode("utf-8"))
+            validate_modulemap(
+                archive.read(modulemap_name).decode("utf-8"),
+                names,
+                framework_root,
+                require_floorp_binding,
+            )
 
             umbrella = archive.read(umbrella_name).decode("utf-8")
             ffi_name = f"{framework_root}/Headers/floorp_prefs_syncFFI.h"
