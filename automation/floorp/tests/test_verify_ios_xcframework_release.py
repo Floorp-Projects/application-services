@@ -108,19 +108,37 @@ class ReleaseVerifierTests(unittest.TestCase):
         }
 
     @staticmethod
-    def write_swift_archive(path, wrapper=b"generated"):
+    def write_swift_archive(
+        path,
+        wrapper=b"generated",
+        syncmanager_wrapper=b"generated",
+        include_syncmanager=True,
+        include_sync15=True,
+    ):
+        members = [
+            (
+                "swift-components/all/Generated/floorp_prefs_sync.swift",
+                wrapper,
+            ),
+            (
+                "swift-components/all/Generated/floorp_prefs_syncFFI.h",
+                b"generated",
+            ),
+            ("swift-components/focus/Generated/nimbus.swift", b"generated"),
+        ]
+        if include_syncmanager:
+            members.append(
+                (
+                    "swift-components/all/Generated/syncmanager.swift",
+                    syncmanager_wrapper,
+                )
+            )
+        if include_sync15:
+            members.append(
+                ("swift-components/all/Generated/sync15.swift", b"generated")
+            )
         with tarfile.open(path, "w:xz") as archive:
-            for name, payload in (
-                (
-                    "swift-components/all/Generated/floorp_prefs_sync.swift",
-                    wrapper,
-                ),
-                (
-                    "swift-components/all/Generated/floorp_prefs_syncFFI.h",
-                    b"generated",
-                ),
-                ("swift-components/focus/Generated/nimbus.swift", b"generated"),
-            ):
+            for name, payload in members:
                 member = tarfile.TarInfo(name)
                 member.size = len(payload)
                 archive.addfile(member, io.BytesIO(payload))
@@ -260,6 +278,54 @@ class ReleaseVerifierTests(unittest.TestCase):
             result = VERIFIER.validate_swift_archive(path)
             self.assertEqual(result["sha256"], VERIFIER.sha256(path))
 
+    def test_floorp_uniffi_config_uses_combined_swift_module(self):
+        self.assertEqual(
+            VERIFIER.validate_floorp_uniffi_config(),
+            VERIFIER.FLOORP_SWIFT_BINDING_CONFIG,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, contents in (
+                (
+                    "wrong-module.toml",
+                    "[bindings.swift]\n"
+                    'ffi_module_name = "floorp_prefs_syncFFI"\n'
+                    'ffi_module_filename = "floorp_prefs_syncFFI"\n',
+                ),
+                (
+                    "wrong-filename.toml",
+                    "[bindings.swift]\n"
+                    'ffi_module_name = "MozillaRustComponents"\n'
+                    'ffi_module_filename = "wrongFFI"\n',
+                ),
+            ):
+                with self.subTest(name=name):
+                    path = root / name
+                    path.write_text(contents, encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "Swift UniFFI config"):
+                        VERIFIER.validate_floorp_uniffi_config(path)
+
+            with self.assertRaisesRegex(ValueError, "could not load"):
+                VERIFIER.validate_floorp_uniffi_config(root / "missing.toml")
+
+            malformed = root / "wrong-section-type.toml"
+            malformed.write_text('bindings = "not a table"\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "could not load"):
+                VERIFIER.validate_floorp_uniffi_config(malformed)
+
+    def test_swift_archive_requires_sync_manager_dependency_bindings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for missing_name, options in (
+                ("syncmanager.swift", {"include_syncmanager": False}),
+                ("sync15.swift", {"include_sync15": False}),
+            ):
+                with self.subTest(missing_name=missing_name):
+                    path = pathlib.Path(directory) / f"missing-{missing_name}.tar.xz"
+                    self.write_swift_archive(path, **options)
+                    with self.assertRaisesRegex(ValueError, missing_name):
+                        VERIFIER.validate_swift_archive(path)
+
     def test_generated_floorp_wrapper_typechecks_for_every_architecture(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -282,10 +348,15 @@ class ReleaseVerifierTests(unittest.TestCase):
                 if command[-1] == "--show-sdk-path":
                     return "/Mock.sdk"
                 if "swiftc" in command:
+                    sources = [
+                        pathlib.Path(argument)
+                        for argument in command
+                        if argument.endswith(".swift")
+                    ]
                     compiled_sources.append(
                         (
-                            pathlib.Path(command[-2]).name,
-                            pathlib.Path(command[-1]).read_text(),
+                            [source.name for source in sources[:-1]],
+                            sources[-1].read_text(),
                         )
                     )
                 return ""
@@ -323,8 +394,15 @@ class ReleaseVerifierTests(unittest.TestCase):
             )
             swiftc_calls = [call for call in calls if "swiftc" in call]
             self.assertEqual(len(swiftc_calls), 3)
-            for wrapper_name, smoke in compiled_sources:
-                self.assertEqual(wrapper_name, "floorp_prefs_sync.swift")
+            for wrapper_names, smoke in compiled_sources:
+                self.assertEqual(
+                    wrapper_names,
+                    [
+                        "sync15.swift",
+                        "syncmanager.swift",
+                        "floorp_prefs_sync.swift",
+                    ],
+                )
                 self.assertIn(": FloorpPrefsSyncDelegate", smoke)
                 self.assertIn("FloorpPrefsSyncPrepareInput(", smoke)
                 self.assertIn("FloorpPrefsSyncFinish(", smoke)
@@ -338,6 +416,9 @@ class ReleaseVerifierTests(unittest.TestCase):
                 self.assertIn("FloorpPrefsSyncStore(delegate:", smoke)
                 self.assertIn("store.syncState()", smoke)
                 self.assertIn("store.registerWithSyncManager()", smoke)
+                self.assertIn("let manager = SyncManager()", smoke)
+                self.assertIn("manager.disconnect()", smoke)
+                self.assertIn("try manager.disconnectChecked()", smoke)
 
     def test_corrupt_generated_floorp_wrapper_fails_typecheck(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -354,7 +435,11 @@ class ReleaseVerifierTests(unittest.TestCase):
                 if command[-1] == "--show-sdk-path":
                     return "/Mock.sdk"
                 if "swiftc" in command:
-                    wrapper = pathlib.Path(command[-2])
+                    wrapper = next(
+                        pathlib.Path(argument)
+                        for argument in command
+                        if argument.endswith("floorp_prefs_sync.swift")
+                    )
                     if wrapper.read_text() == "not valid Swift !!!":
                         raise subprocess.CalledProcessError(1, command)
                 return ""
@@ -478,6 +563,105 @@ Load command 1
         VERIFIER.validate_build_versions(records, "IOSSIMULATOR", "15.0")
         with self.assertRaisesRegex(ValueError, "expected IOS"):
             VERIFIER.validate_build_versions(records, "IOS", "15.0")
+
+    def test_resolve_rust_llvm_nm_uses_pinned_sysroot_and_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sysroot = pathlib.Path(directory) / "toolchain"
+            llvm_nm = (
+                sysroot
+                / "lib/rustlib/aarch64-apple-darwin/bin/llvm-nm"
+            )
+            llvm_nm.parent.mkdir(parents=True)
+            llvm_nm.write_text("tool", encoding="utf-8")
+            llvm_nm.chmod(0o755)
+
+            def fake_run(*command, cwd=VERIFIER.REPO_ROOT):
+                if command == ("rustc", "--print", "sysroot"):
+                    return str(sysroot)
+                if command == ("rustc", "--version", "--verbose"):
+                    return "rustc 1.91.0\nhost: aarch64-apple-darwin\n"
+                self.fail(f"unexpected command: {command}")
+
+            with unittest.mock.patch.object(
+                VERIFIER, "run", side_effect=fake_run
+            ):
+                self.assertEqual(VERIFIER.resolve_rust_llvm_nm(), llvm_nm.resolve())
+
+    def test_resolve_rust_llvm_nm_fails_closed_when_component_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sysroot = pathlib.Path(directory) / "toolchain"
+
+            def fake_run(*command, cwd=VERIFIER.REPO_ROOT):
+                if command == ("rustc", "--print", "sysroot"):
+                    return str(sysroot)
+                if command == ("rustc", "--version", "--verbose"):
+                    return "rustc 1.91.0\nhost: aarch64-apple-darwin\n"
+                self.fail(f"unexpected command: {command}")
+
+            with unittest.mock.patch.object(
+                VERIFIER, "run", side_effect=fake_run
+            ):
+                with self.assertRaisesRegex(ValueError, "llvm-tools-preview"):
+                    VERIFIER.resolve_rust_llvm_nm()
+
+    def test_inspect_binary_uses_rust_llvm_nm_for_each_architecture(self):
+        llvm_nm = pathlib.Path(
+            "/pinned-rust/lib/rustlib/aarch64-apple-darwin/bin/llvm-nm"
+        )
+        calls = []
+
+        def fake_run(*command, cwd=VERIFIER.REPO_ROOT):
+            calls.append(command)
+            if command[0] == "/usr/bin/lipo":
+                return "x86_64 arm64"
+            if command[0] == "/usr/bin/otool":
+                return """
+Load command 1
+      cmd LC_BUILD_VERSION
+ platform IOSSIMULATOR
+    minos 15.0
+      sdk 26.3
+"""
+            if command[0] == str(llvm_nm):
+                architecture = command[1].split("=", 1)[1]
+                return (
+                    "archive(member.o):\n"
+                    f"_{VERIFIER.FLOORP_CONTRACT_SYMBOL}\n"
+                    f"_{architecture}_only\n"
+                )
+            self.fail(f"unexpected command: {command}")
+
+        with unittest.mock.patch.object(
+            VERIFIER, "resolve_rust_llvm_nm", return_value=llvm_nm
+        ), unittest.mock.patch.object(VERIFIER, "run", side_effect=fake_run):
+            result = VERIFIER.inspect_binary(b"universal", None)
+
+        self.assertEqual(result["architectures"], {"arm64", "x86_64"})
+        self.assertEqual(
+            result["symbols_by_architecture"],
+            {
+                "arm64": {VERIFIER.FLOORP_CONTRACT_SYMBOL, "arm64_only"},
+                "x86_64": {VERIFIER.FLOORP_CONTRACT_SYMBOL, "x86_64_only"},
+            },
+        )
+        llvm_nm_calls = [call for call in calls if call[0] == str(llvm_nm)]
+        self.assertEqual(
+            [call[1] for call in llvm_nm_calls],
+            ["--arch=arm64", "--arch=x86_64"],
+        )
+        self.assertTrue(
+            all(
+                call[2:6]
+                == (
+                    "--extern-only",
+                    "--defined-only",
+                    "--format=just-symbols",
+                    "--quiet",
+                )
+                for call in llvm_nm_calls
+            )
+        )
+        self.assertFalse(any(call[0] == "/usr/bin/nm" for call in calls))
 
     def test_swift_import_smoke_covers_device_and_simulator(self):
         with tempfile.TemporaryDirectory() as directory:

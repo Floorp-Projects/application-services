@@ -81,22 +81,55 @@ impl SyncManager {
         Ok(())
     }
 
+    fn collect_disconnect_failures<I, F>(
+        engine_ids: I,
+        mut reset_engine: F,
+    ) -> Vec<(SyncEngineId, anyhow::Error)>
+    where
+        I: IntoIterator<Item = SyncEngineId>,
+        F: FnMut(&SyncEngineId) -> Option<anyhow::Result<()>>,
+    {
+        let mut failures = Vec::new();
+        for engine_id in engine_ids {
+            match reset_engine(&engine_id) {
+                Some(Ok(())) => {}
+                Some(Err(error)) => failures.push((engine_id, error)),
+                None => {
+                    warn!("Unable to reset {}, be sure to call register_with_sync_manager before disconnect if this is surprising", engine_id);
+                }
+            }
+        }
+        failures
+    }
+
     fn disconnect_failures(&self) -> Vec<(SyncEngineId, anyhow::Error)> {
         // A disconnect/reset must not invalidate a prepared prefs transaction
         // after it has returned an outgoing record but before sync15 uploads
         // it. Serialize the complete operation with `sync`.
         let _operation = self.operation.lock();
-        let mut failures = Vec::new();
-        for engine_id in SyncEngineId::iter() {
-            if let Some(engine) = Self::get_engine(&engine_id) {
-                if let Err(e) = engine.reset(&EngineSyncAssociation::Disconnected) {
-                    failures.push((engine_id, e));
-                }
-            } else {
-                warn!("Unable to reset {}, be sure to call register_with_sync_manager before disconnect if this is surprising", engine_id);
-            }
+        Self::collect_disconnect_failures(SyncEngineId::iter(), |engine_id| {
+            Self::get_engine(engine_id)
+                .map(|engine| engine.reset(&EngineSyncAssociation::Disconnected))
+        })
+    }
+
+    fn checked_disconnect_result<F>(
+        failures: Vec<(SyncEngineId, anyhow::Error)>,
+        mut report_additional_failure: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&SyncEngineId, &anyhow::Error),
+    {
+        let mut failures = failures.into_iter();
+        let Some((first_engine, first_error)) = failures.next() else {
+            return Ok(());
+        };
+        for (engine_id, error) in failures {
+            report_additional_failure(&engine_id, &error);
         }
-        failures
+        Err(first_error
+            .context(format!("Failed to reset {first_engine}"))
+            .into())
     }
 
     /// Disconnect engines from sync, deleting/resetting the sync-related data.
@@ -122,21 +155,14 @@ impl SyncManager {
     /// still reported so that none are silently discarded.
     pub fn disconnect_checked(&self) -> Result<()> {
         breadcrumb!("SyncManager disconnect_checked()");
-        let mut failures = self.disconnect_failures().into_iter();
-        let Some((first_engine, first_error)) = failures.next() else {
-            return Ok(());
-        };
-        for (engine_id, error) in failures {
+        Self::checked_disconnect_result(self.disconnect_failures(), |engine_id, error| {
             error_support::report_error!(
                 "sync-manager-reset",
                 "Failed to reset {}: {}",
                 engine_id,
                 error
             );
-        }
-        Err(first_error
-            .context(format!("Failed to reset {first_engine}"))
-            .into())
+        })
     }
 
     /// Perform a sync.  See [SyncParams] and [SyncResult] for details on how this works
@@ -429,6 +455,58 @@ mod test {
         for engine_id in SyncEngineId::iter() {
             assert_eq!(engine_id, SyncEngineId::try_from(engine_id.name()).unwrap());
         }
+    }
+
+    #[test]
+    fn disconnect_collection_attempts_every_engine_after_failures() {
+        let requested = vec![
+            SyncEngineId::Prefs,
+            SyncEngineId::Passwords,
+            SyncEngineId::Tabs,
+            SyncEngineId::History,
+        ];
+        let mut attempted = Vec::new();
+        let failures = SyncManager::collect_disconnect_failures(requested.clone(), |engine_id| {
+            attempted.push(engine_id.clone());
+            Some(match engine_id {
+                SyncEngineId::Prefs => Err(anyhow::anyhow!("prefs failure")),
+                SyncEngineId::Tabs => Err(anyhow::anyhow!("tabs failure")),
+                _ => Ok(()),
+            })
+        });
+
+        assert_eq!(attempted, requested);
+        assert_eq!(
+            failures
+                .iter()
+                .map(|(engine_id, _)| engine_id.clone())
+                .collect::<Vec<_>>(),
+            vec![SyncEngineId::Prefs, SyncEngineId::Tabs]
+        );
+    }
+
+    #[test]
+    fn checked_disconnect_returns_first_failure_and_reports_the_rest() {
+        let failures = vec![
+            (SyncEngineId::Prefs, anyhow::anyhow!("prefs failure")),
+            (SyncEngineId::Tabs, anyhow::anyhow!("tabs failure")),
+            (SyncEngineId::History, anyhow::anyhow!("history failure")),
+        ];
+        let mut reported = Vec::new();
+
+        let error = SyncManager::checked_disconnect_result(failures, |engine_id, error| {
+            reported.push((engine_id.clone(), error.to_string()))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Failed to reset prefs"));
+        assert_eq!(
+            reported,
+            vec![
+                (SyncEngineId::Tabs, "tabs failure".to_string()),
+                (SyncEngineId::History, "history failure".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -49,6 +49,10 @@ class FloorpIOSWorkflowTests(unittest.TestCase):
         self.assertNotIn(
             'installer="${RUNNER_TEMP}/floorp-rustup-init"', self.rust_installer
         )
+        self.assertIn(
+            '--component "clippy,llvm-tools-preview,rustfmt,rust-src"',
+            self.rust_installer,
+        )
 
     def test_docs_allowlist_is_explicit_and_unknown_paths_build(self):
         self.assertFalse(

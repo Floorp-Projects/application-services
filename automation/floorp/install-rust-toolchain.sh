@@ -92,7 +92,7 @@ install_args=(
     toolchain install "$rust_version"
     --no-self-update
     --profile minimal
-    --component "clippy,rustfmt,rust-src"
+    --component "clippy,llvm-tools-preview,rustfmt,rust-src"
 )
 if (( ${#rust_targets[@]} > 0 )); then
     install_args+=(--target "$(IFS=,; echo "${rust_targets[*]}")")

@@ -35,6 +35,11 @@ it must not wait for an actor scheduled on the same executor. Callbacks may
 read the Rust Sync state, but must not synchronously start another prefs
 Sync/reset/disconnect operation before returning.
 
+The application must also retain its registered `FloorpPrefsSyncStore`
+strongly for the complete signed-in lifetime. The Sync Manager registry keeps
+only a weak reference; if the store is released, `prefs` appears unregistered
+and neither Sync nor checked disconnect can invoke the persistence delegate.
+
 1. `prepare` receives the typed remote Notes state and returns an opaque store
    token plus either no upload or the merged Notes JSON string.
 2. Rust gives that token back to `sync_finished` only after `sync15` confirms

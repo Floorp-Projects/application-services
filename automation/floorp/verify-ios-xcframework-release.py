@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -31,6 +32,11 @@ SWIFT_ARCHIVE = "swift-components.tar.xz"
 MANIFEST = "release-manifest.json"
 CHECKSUMS = "SHA256SUMS"
 FLOORP_CONTRACT_SYMBOL = "ffi_floorp_prefs_sync_uniffi_contract_version"
+FLOORP_UNIFFI_CONFIG = REPO_ROOT / "components/floorp-prefs-sync/uniffi.toml"
+FLOORP_SWIFT_BINDING_CONFIG = {
+    "ffi_module_name": "MozillaRustComponents",
+    "ffi_module_filename": "floorp_prefs_syncFFI",
+}
 APPLE_PLATFORM_NAMES = {
     "2": "IOS",
     "7": "IOSSIMULATOR",
@@ -71,6 +77,36 @@ def load_config(path: pathlib.Path) -> dict[str, Any]:
     if config.get("artifacts") != expected_artifacts:
         raise ValueError(f"artifacts must be exactly {expected_artifacts}")
     return config
+
+
+def validate_floorp_uniffi_config(
+    path: pathlib.Path = FLOORP_UNIFFI_CONFIG,
+) -> dict[str, str]:
+    parser = configparser.ConfigParser(
+        delimiters=("=",),
+        interpolation=None,
+        strict=True,
+    )
+    try:
+        with path.open(encoding="utf-8") as stream:
+            parser.read_file(stream)
+    except (OSError, configparser.Error) as error:
+        raise ValueError(f"could not load Floorp UniFFI config: {path}") from error
+    swift = parser["bindings.swift"] if parser.has_section("bindings.swift") else {}
+    actual: dict[str, str | None] = {}
+    for key in FLOORP_SWIFT_BINDING_CONFIG:
+        raw_value = swift.get(key)
+        try:
+            value = json.loads(raw_value) if raw_value is not None else None
+        except json.JSONDecodeError:
+            value = None
+        actual[key] = value if isinstance(value, str) else None
+    if actual != FLOORP_SWIFT_BINDING_CONFIG:
+        raise ValueError(
+            f"Floorp Swift UniFFI config {actual!r} differs from "
+            f"{FLOORP_SWIFT_BINDING_CONFIG!r}"
+        )
+    return FLOORP_SWIFT_BINDING_CONFIG.copy()
 
 
 def run(*command: str, cwd: pathlib.Path = REPO_ROOT) -> str:
@@ -268,6 +304,7 @@ def validate_source(
     ).read_text(encoding="utf-8")
     if '#import "floorp_prefs_syncFFI.h"' not in umbrella:
         raise ValueError("Floorp preferences FFI is absent from the iOS umbrella header")
+    validate_floorp_uniffi_config()
     return actual_merge_base
 
 
@@ -367,6 +404,37 @@ def validate_build_versions(
             )
 
 
+def rust_host_triple(version_output: str) -> str:
+    hosts = [
+        line.split(":", 1)[1].strip()
+        for line in version_output.splitlines()
+        if line.startswith("host:")
+    ]
+    if len(hosts) != 1 or not re.fullmatch(r"[A-Za-z0-9_.-]+", hosts[0]):
+        raise ValueError("could not determine the pinned Rust host triple")
+    return hosts[0]
+
+
+def resolve_rust_llvm_nm() -> pathlib.Path:
+    sysroot = pathlib.Path(run("rustc", "--print", "sysroot")).resolve()
+    host = rust_host_triple(run("rustc", "--version", "--verbose"))
+    llvm_nm = (sysroot / "lib" / "rustlib" / host / "bin" / "llvm-nm").resolve()
+    if not llvm_nm.is_file() or not os.access(llvm_nm, os.X_OK):
+        raise ValueError(
+            "the pinned Rust llvm-nm is missing; install llvm-tools-preview "
+            f"for host {host}: {llvm_nm}"
+        )
+    return llvm_nm
+
+
+def parse_llvm_nm_symbols(output: str) -> set[str]:
+    return {
+        line.strip().split()[-1].removeprefix("_")
+        for line in output.splitlines()
+        if line.strip() and not line.rstrip().endswith(":")
+    }
+
+
 def inspect_binary(binary: bytes, runner_temp: str | None) -> dict[str, Any]:
     temp_parent = pathlib.Path(runner_temp) if runner_temp else None
     with tempfile.TemporaryDirectory(dir=temp_parent) as directory:
@@ -386,22 +454,21 @@ def inspect_binary(binary: bytes, runner_temp: str | None) -> dict[str, Any]:
             )
         )
         symbols_by_architecture: dict[str, set[str]] = {}
+        llvm_nm = resolve_rust_llvm_nm()
         for architecture in sorted(architectures):
             symbol_output = run(
-                "/usr/bin/nm",
-                "-arch",
-                architecture,
-                "-g",
-                "-j",
-                "-U",
+                str(llvm_nm),
+                f"--arch={architecture}",
+                "--extern-only",
+                "--defined-only",
+                "--format=just-symbols",
+                "--quiet",
                 str(binary_path),
                 cwd=REPO_ROOT,
             )
-            symbols_by_architecture[architecture] = {
-                line.strip().split()[-1].removeprefix("_")
-                for line in symbol_output.splitlines()
-                if line.strip() and not line.rstrip().endswith(":")
-            }
+            symbols_by_architecture[architecture] = parse_llvm_nm_symbols(
+                symbol_output
+            )
     return {
         "architectures": architectures,
         "build_versions": build_versions,
@@ -656,6 +723,8 @@ def validate_swift_archive_members(
     required = {
         "swift-components/all/Generated/floorp_prefs_sync.swift",
         "swift-components/all/Generated/floorp_prefs_syncFFI.h",
+        "swift-components/all/Generated/sync15.swift",
+        "swift-components/all/Generated/syncmanager.swift",
     }
     missing = sorted(required - names)
     if missing:
@@ -737,6 +806,9 @@ private func floorpReleaseGeneratedBindingSmoke() throws {
     let store = try FloorpPrefsSyncStore(delegate: delegate, initialState: state)
     _ = store.syncState()
     store.registerWithSyncManager()
+    let manager = SyncManager()
+    manager.disconnect()
+    try manager.disconnectChecked()
     _ = plans
 }
 """
@@ -766,10 +838,12 @@ def validate_floorp_swift_wrapper(
                 swift_archive, members, swift_extraction_root
             )
 
-        wrapper_path = (
-            swift_extraction_root
-            / "swift-components/all/Generated/floorp_prefs_sync.swift"
-        )
+        generated_root = swift_extraction_root / "swift-components/all/Generated"
+        wrapper_paths = [
+            generated_root / "sync15.swift",
+            generated_root / "syncmanager.swift",
+            generated_root / "floorp_prefs_sync.swift",
+        ]
         smoke_path = extraction_root / "FloorpReleaseGeneratedBindingSmoke.swift"
         smoke_path.write_text(
             floorp_generated_binding_smoke_source(),
@@ -811,7 +885,7 @@ def validate_floorp_swift_wrapper(
                     "FloorpReleaseGeneratedBindingSmoke",
                     "-parse-as-library",
                     "-typecheck",
-                    str(wrapper_path),
+                    *(str(path) for path in wrapper_paths),
                     str(smoke_path),
                 )
                 checked_targets.append(target)
