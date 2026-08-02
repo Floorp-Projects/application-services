@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import os
@@ -31,6 +32,11 @@ SWIFT_ARCHIVE = "swift-components.tar.xz"
 MANIFEST = "release-manifest.json"
 CHECKSUMS = "SHA256SUMS"
 FLOORP_CONTRACT_SYMBOL = "ffi_floorp_prefs_sync_uniffi_contract_version"
+FLOORP_UNIFFI_CONFIG = REPO_ROOT / "components/floorp-prefs-sync/uniffi.toml"
+FLOORP_SWIFT_BINDING_CONFIG = {
+    "ffi_module_name": "MozillaRustComponents",
+    "ffi_module_filename": "floorp_prefs_syncFFI",
+}
 APPLE_PLATFORM_NAMES = {
     "2": "IOS",
     "7": "IOSSIMULATOR",
@@ -71,6 +77,36 @@ def load_config(path: pathlib.Path) -> dict[str, Any]:
     if config.get("artifacts") != expected_artifacts:
         raise ValueError(f"artifacts must be exactly {expected_artifacts}")
     return config
+
+
+def validate_floorp_uniffi_config(
+    path: pathlib.Path = FLOORP_UNIFFI_CONFIG,
+) -> dict[str, str]:
+    parser = configparser.ConfigParser(
+        delimiters=("=",),
+        interpolation=None,
+        strict=True,
+    )
+    try:
+        with path.open(encoding="utf-8") as stream:
+            parser.read_file(stream)
+    except (OSError, configparser.Error) as error:
+        raise ValueError(f"could not load Floorp UniFFI config: {path}") from error
+    swift = parser["bindings.swift"] if parser.has_section("bindings.swift") else {}
+    actual: dict[str, str | None] = {}
+    for key in FLOORP_SWIFT_BINDING_CONFIG:
+        raw_value = swift.get(key)
+        try:
+            value = json.loads(raw_value) if raw_value is not None else None
+        except json.JSONDecodeError:
+            value = None
+        actual[key] = value if isinstance(value, str) else None
+    if actual != FLOORP_SWIFT_BINDING_CONFIG:
+        raise ValueError(
+            f"Floorp Swift UniFFI config {actual!r} differs from "
+            f"{FLOORP_SWIFT_BINDING_CONFIG!r}"
+        )
+    return FLOORP_SWIFT_BINDING_CONFIG.copy()
 
 
 def run(*command: str, cwd: pathlib.Path = REPO_ROOT) -> str:
@@ -268,6 +304,7 @@ def validate_source(
     ).read_text(encoding="utf-8")
     if '#import "floorp_prefs_syncFFI.h"' not in umbrella:
         raise ValueError("Floorp preferences FFI is absent from the iOS umbrella header")
+    validate_floorp_uniffi_config()
     return actual_merge_base
 
 
@@ -367,6 +404,37 @@ def validate_build_versions(
             )
 
 
+def rust_host_triple(version_output: str) -> str:
+    hosts = [
+        line.split(":", 1)[1].strip()
+        for line in version_output.splitlines()
+        if line.startswith("host:")
+    ]
+    if len(hosts) != 1 or not re.fullmatch(r"[A-Za-z0-9_.-]+", hosts[0]):
+        raise ValueError("could not determine the pinned Rust host triple")
+    return hosts[0]
+
+
+def resolve_rust_llvm_nm() -> pathlib.Path:
+    sysroot = pathlib.Path(run("rustc", "--print", "sysroot")).resolve()
+    host = rust_host_triple(run("rustc", "--version", "--verbose"))
+    llvm_nm = (sysroot / "lib" / "rustlib" / host / "bin" / "llvm-nm").resolve()
+    if not llvm_nm.is_file() or not os.access(llvm_nm, os.X_OK):
+        raise ValueError(
+            "the pinned Rust llvm-nm is missing; install llvm-tools-preview "
+            f"for host {host}: {llvm_nm}"
+        )
+    return llvm_nm
+
+
+def parse_llvm_nm_symbols(output: str) -> set[str]:
+    return {
+        line.strip().split()[-1].removeprefix("_")
+        for line in output.splitlines()
+        if line.strip() and not line.rstrip().endswith(":")
+    }
+
+
 def inspect_binary(binary: bytes, runner_temp: str | None) -> dict[str, Any]:
     temp_parent = pathlib.Path(runner_temp) if runner_temp else None
     with tempfile.TemporaryDirectory(dir=temp_parent) as directory:
@@ -386,22 +454,21 @@ def inspect_binary(binary: bytes, runner_temp: str | None) -> dict[str, Any]:
             )
         )
         symbols_by_architecture: dict[str, set[str]] = {}
+        llvm_nm = resolve_rust_llvm_nm()
         for architecture in sorted(architectures):
             symbol_output = run(
-                "/usr/bin/nm",
-                "-arch",
-                architecture,
-                "-g",
-                "-j",
-                "-U",
+                str(llvm_nm),
+                f"--arch={architecture}",
+                "--extern-only",
+                "--defined-only",
+                "--format=just-symbols",
+                "--quiet",
                 str(binary_path),
                 cwd=REPO_ROOT,
             )
-            symbols_by_architecture[architecture] = {
-                line.strip().split()[-1].removeprefix("_")
-                for line in symbol_output.splitlines()
-                if line.strip() and not line.rstrip().endswith(":")
-            }
+            symbols_by_architecture[architecture] = parse_llvm_nm_symbols(
+                symbol_output
+            )
     return {
         "architectures": architectures,
         "build_versions": build_versions,
@@ -409,15 +476,51 @@ def inspect_binary(binary: bytes, runner_temp: str | None) -> dict[str, Any]:
     }
 
 
-def validate_modulemap(modulemap: str) -> None:
-    if not re.search(
-        r"\b(?:framework\s+)?module\s+MozillaRustComponents\b", modulemap
-    ):
+def validate_modulemap(
+    modulemap: str,
+    archive_names: set[str],
+    framework_root: str,
+    require_floorp_binding: bool,
+) -> None:
+    module = re.fullmatch(
+        r"\s*framework\s+module\s+MozillaRustComponents\s*\{"
+        r"(?P<body>[^{}]*)\}\s*",
+        modulemap,
+    )
+    if module is None:
         raise ValueError("modulemap does not define MozillaRustComponents")
-    if not re.search(
-        r'\bumbrella\s+header\s+"MozillaRustComponents\.h"', modulemap
-    ):
-        raise ValueError("modulemap does not use MozillaRustComponents.h")
+    body = module.group("body")
+    if not re.search(r"(?m)^\s*export\s+\*\s*$", body):
+        raise ValueError("modulemap does not export its headers")
+
+    direct_headers = re.findall(r'(?m)^\s*header\s+"([^\r\n"]+)"\s*$', body)
+    if len(direct_headers) != len(set(direct_headers)):
+        raise ValueError("modulemap contains duplicate header declarations")
+    required_headers = {"RustViaductFFI.h"}
+    floorp_header = "floorp_prefs_syncFFI.h"
+    if require_floorp_binding:
+        required_headers.add(floorp_header)
+    elif floorp_header in direct_headers:
+        raise ValueError("Focus modulemap unexpectedly contains Floorp preferences FFI")
+
+    missing_required = sorted(required_headers - set(direct_headers))
+    if missing_required:
+        raise ValueError(f"modulemap is missing required headers: {missing_required}")
+
+    unsafe_headers = sorted(
+        header
+        for header in direct_headers
+        if header.endswith("/") or not safe_archive_name(header)
+    )
+    if unsafe_headers:
+        raise ValueError(f"modulemap contains unsafe header paths: {unsafe_headers}")
+    missing_headers = sorted(
+        header
+        for header in direct_headers
+        if f"{framework_root}/Headers/{header}" not in archive_names
+    )
+    if missing_headers:
+        raise ValueError(f"modulemap references missing headers: {missing_headers}")
 
 
 def validate_swift_imports(
@@ -548,7 +651,12 @@ def validate_xcframework(
                 expected_platform,
                 config["ios"]["deployment_target"],
             )
-            validate_modulemap(archive.read(modulemap_name).decode("utf-8"))
+            validate_modulemap(
+                archive.read(modulemap_name).decode("utf-8"),
+                names,
+                framework_root,
+                require_floorp_binding,
+            )
 
             umbrella = archive.read(umbrella_name).decode("utf-8")
             ffi_name = f"{framework_root}/Headers/floorp_prefs_syncFFI.h"
@@ -656,6 +764,8 @@ def validate_swift_archive_members(
     required = {
         "swift-components/all/Generated/floorp_prefs_sync.swift",
         "swift-components/all/Generated/floorp_prefs_syncFFI.h",
+        "swift-components/all/Generated/sync15.swift",
+        "swift-components/all/Generated/syncmanager.swift",
     }
     missing = sorted(required - names)
     if missing:
@@ -687,6 +797,64 @@ def extract_validated_swift_archive(
             shutil.copyfileobj(source, stream)
 
 
+def floorp_generated_binding_smoke_source() -> str:
+    return """import Foundation
+
+private final class FloorpReleasePrefsDelegate: FloorpPrefsSyncDelegate, @unchecked Sendable {
+    func prepare(input: FloorpPrefsSyncPrepareInput) throws -> FloorpPrefsSyncPlan {
+        .noUpload(transactionToken: Data())
+    }
+
+    func syncFinished(finish: FloorpPrefsSyncFinish) throws {}
+
+    func syncStateChanged(state: FloorpPrefsSyncState) throws {}
+
+    func associationReset(state: FloorpPrefsSyncState) throws {}
+}
+
+private func floorpReleaseGeneratedBindingSmoke() throws {
+    let state = FloorpPrefsSyncState(
+        globalSyncId: nil,
+        collectionSyncId: nil,
+        lastModifiedMillis: 0
+    )
+    let remoteStates: [FloorpPrefsRemoteNotes] = [
+        .recordMissing,
+        .notesKeyMissing,
+        .notesNull,
+        .notesString(value: "[]"),
+    ]
+    let input = FloorpPrefsSyncPrepareInput(
+        remoteNotes: remoteStates[0],
+        remoteRecordModifiedMillis: nil,
+        collectionModifiedMillis: 0,
+        maximumNotesValueBytes: 1
+    )
+    let plans: [FloorpPrefsSyncPlan] = [
+        .noUpload(transactionToken: Data()),
+        .upload(transactionToken: Data(), notesValue: "[]"),
+    ]
+    let finish = FloorpPrefsSyncFinish(
+        transactionToken: Data(),
+        didUpload: false,
+        serverModifiedMillis: 0
+    )
+    let delegate: FloorpPrefsSyncDelegate = FloorpReleasePrefsDelegate()
+    _ = try delegate.prepare(input: input)
+    try delegate.syncFinished(finish: finish)
+    try delegate.syncStateChanged(state: state)
+    try delegate.associationReset(state: state)
+    let store = try FloorpPrefsSyncStore(delegate: delegate, initialState: state)
+    _ = store.syncState()
+    store.registerWithSyncManager()
+    let manager = SyncManager()
+    manager.disconnect()
+    try manager.disconnectChecked()
+    _ = plans
+}
+"""
+
+
 def validate_floorp_swift_wrapper(
     swift_archive_path: pathlib.Path,
     xcframework_path: pathlib.Path,
@@ -711,16 +879,15 @@ def validate_floorp_swift_wrapper(
                 swift_archive, members, swift_extraction_root
             )
 
-        wrapper_path = (
-            swift_extraction_root
-            / "swift-components/all/Generated/floorp_prefs_sync.swift"
-        )
+        generated_root = swift_extraction_root / "swift-components/all/Generated"
+        wrapper_paths = [
+            generated_root / "sync15.swift",
+            generated_root / "syncmanager.swift",
+            generated_root / "floorp_prefs_sync.swift",
+        ]
         smoke_path = extraction_root / "FloorpReleaseGeneratedBindingSmoke.swift"
         smoke_path.write_text(
-            "private func floorpReleaseGeneratedBindingSmoke(\n"
-            "    _ store: FloorpPrefsSyncStore.Type,\n"
-            "    _ state: FloorpPrefsSyncState.Type\n"
-            ") {}\n",
+            floorp_generated_binding_smoke_source(),
             encoding="utf-8",
         )
         checked_targets: list[str] = []
@@ -759,7 +926,7 @@ def validate_floorp_swift_wrapper(
                     "FloorpReleaseGeneratedBindingSmoke",
                     "-parse-as-library",
                     "-typecheck",
-                    str(wrapper_path),
+                    *(str(path) for path in wrapper_paths),
                     str(smoke_path),
                 )
                 checked_targets.append(target)
@@ -882,7 +1049,7 @@ def main() -> None:
         print("Floorp iOS release source metadata is valid.")
         return
 
-    artifact_data = validate_artifacts(args.artifacts)
+    artifact_data = validate_artifacts(args.artifacts, config)
     if args.write_metadata:
         write_metadata(
             args.artifacts,

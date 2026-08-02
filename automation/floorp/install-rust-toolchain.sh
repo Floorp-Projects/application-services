@@ -76,7 +76,9 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
-installer="${RUNNER_TEMP}/floorp-rustup-init"
+installer_dir="${RUNNER_TEMP}/floorp-rustup-installer"
+mkdir -p "$installer_dir"
+installer="${installer_dir}/rustup-init"
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
     "https://static.rust-lang.org/rustup/archive/${rustup_version}/${rustup_platform}/rustup-init" \
     --output "$installer"
@@ -90,7 +92,7 @@ install_args=(
     toolchain install "$rust_version"
     --no-self-update
     --profile minimal
-    --component "clippy,rustfmt,rust-src"
+    --component "clippy,llvm-tools-preview,rustfmt,rust-src"
 )
 if (( ${#rust_targets[@]} > 0 )); then
     install_args+=(--target "$(IFS=,; echo "${rust_targets[*]}")")

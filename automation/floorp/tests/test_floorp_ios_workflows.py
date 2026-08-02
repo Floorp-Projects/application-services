@@ -3,6 +3,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import importlib.util
+import json
 import pathlib
 import subprocess
 import tempfile
@@ -31,6 +32,27 @@ class FloorpIOSWorkflowTests(unittest.TestCase):
         cls.release = (
             workflows / "floorp-ios-xcframework-release.yml"
         ).read_text(encoding="utf-8")
+        cls.config = json.loads(
+            (AUTOMATION / "ios-xcframework-release-config.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cls.rust_installer = (
+            AUTOMATION / "install-rust-toolchain.sh"
+        ).read_text(encoding="utf-8")
+
+    def test_runner_compatible_toolchain_bootstrap(self):
+        self.assertEqual(self.config["toolchain"]["python"], "3.12.10")
+        self.assertIn(
+            'installer="${installer_dir}/rustup-init"', self.rust_installer
+        )
+        self.assertNotIn(
+            'installer="${RUNNER_TEMP}/floorp-rustup-init"', self.rust_installer
+        )
+        self.assertIn(
+            '--component "clippy,llvm-tools-preview,rustfmt,rust-src"',
+            self.rust_installer,
+        )
 
     def test_docs_allowlist_is_explicit_and_unknown_paths_build(self):
         self.assertFalse(

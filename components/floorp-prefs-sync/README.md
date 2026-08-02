@@ -35,6 +35,11 @@ it must not wait for an actor scheduled on the same executor. Callbacks may
 read the Rust Sync state, but must not synchronously start another prefs
 Sync/reset/disconnect operation before returning.
 
+The application must also retain its registered `FloorpPrefsSyncStore`
+strongly for the complete signed-in lifetime. The Sync Manager registry keeps
+only a weak reference; if the store is released, `prefs` appears unregistered
+and neither Sync nor checked disconnect can invoke the persistence delegate.
+
 1. `prepare` receives the typed remote Notes state and returns an opaque store
    token plus either no upload or the merged Notes JSON string.
 2. Rust gives that token back to `sync_finished` only after `sync15` confirms
@@ -42,7 +47,10 @@ Sync/reset/disconnect operation before returning.
 3. `sync_state_changed` persists the successful collection timestamp.
 4. `association_reset` persists new Sync IDs, resets the timestamp, and tells
    the application to invalidate its three-way-merge base without deleting
-local Notes.
+   local Notes. Embedders that require a durable reset during sign-out should
+   call Sync Manager's throwing `disconnect_checked` entry point. The legacy
+   non-throwing `disconnect` API remains available for existing callers and
+   reports persistence failures without returning them.
 
 `maximum_notes_value_bytes` is dynamic: it subtracts the exact aggregate
 framing and every preserved unknown entry from the local cleartext limit. It
