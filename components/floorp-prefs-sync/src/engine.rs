@@ -1441,4 +1441,120 @@ mod tests {
             Err(FloorpPrefsSyncError::InvalidPersistedState)
         ));
     }
+
+    #[test]
+    fn failed_upload_retries_with_the_same_transaction_and_base_advances_only_after_confirmation() {
+        error_support::init_for_tests();
+        let (delegate, store, engine) = test_engine(upload(b"retry-proof", "merged-notes"));
+        stage(&engine, Vec::new()).unwrap();
+        let outgoing = apply(&engine, 200).unwrap();
+        assert!(outgoing.len() == 1);
+
+        // A transport/upload failure (unexpected upload ids) must not confirm
+        // the prepared transaction nor advance the successful base.
+        let error = engine
+            .set_uploaded(
+                ServerTimestamp(201),
+                vec![Guid::new(PREFS_RECORD_ID), Guid::new("extra-record")],
+            )
+            .unwrap_err();
+        is_error(&error, |error| {
+            matches!(error, FloorpPrefsSyncError::UploadNotConfirmed)
+        });
+        assert!(delegate.finishes.lock().is_empty());
+        assert!(
+            store.sync_state().last_modified_millis == 0,
+            "base must not advance on a failed upload"
+        );
+
+        // The retry confirms the SAME prepared transaction and only then
+        // advances the successful base to the retried server timestamp.
+        engine
+            .set_uploaded(ServerTimestamp(202), vec![Guid::new(PREFS_RECORD_ID)])
+            .unwrap();
+        engine.sync_finished().unwrap();
+        let finishes = delegate.finishes.lock();
+        assert!(finishes.len() == 1);
+        assert!(finishes[0].transaction_token == b"retry-proof");
+        assert!(finishes[0].server_modified_millis == 202);
+        assert!(
+            store.sync_state().last_modified_millis == 202,
+            "base advances only after the confirmed retry"
+        );
+    }
+
+    #[test]
+    fn account_associations_are_isolated_between_stores() {
+        error_support::init_for_tests();
+        let (delegate_a, store_a, engine_a) = test_engine(no_upload(b"account-a-proof"));
+        let (delegate_b, store_b, engine_b) = test_engine(no_upload(b"account-b-proof"));
+
+        let connected_a = EngineSyncAssociation::Connected(CollSyncIds {
+            global: Guid::new("account-a-global"),
+            coll: Guid::new("account-a-prefs"),
+        });
+        let connected_b = EngineSyncAssociation::Connected(CollSyncIds {
+            global: Guid::new("account-b-global"),
+            coll: Guid::new("account-b-prefs"),
+        });
+        engine_a.reset(&connected_a).unwrap();
+        engine_b.reset(&connected_b).unwrap();
+
+        // Disconnecting account A must not touch account B's association.
+        engine_a.wipe().unwrap();
+
+        let state_a = store_a.sync_state();
+        assert!(state_a.global_sync_id.is_none());
+        assert!(state_a.collection_sync_id.is_none());
+
+        let state_b = store_b.sync_state();
+        assert!(state_b.global_sync_id.as_deref() == Some("account-b-global"));
+        assert!(state_b.collection_sync_id.as_deref() == Some("account-b-prefs"));
+
+        // Each store reports only its own association changes: account A
+        // connected then disconnected (2), account B only connected (1).
+        assert!(delegate_a.association_resets.lock().len() == 2);
+        assert!(delegate_b.association_resets.lock().len() == 1);
+    }
+
+    #[test]
+    fn a_cancelled_run_never_confirms_and_the_store_stays_reusable() {
+        error_support::init_for_tests();
+        let delegate = Arc::new(FakeDelegate::default());
+        delegate
+            .plans
+            .lock()
+            .push_back(upload(b"cancelled-proof", "cancelled-notes"));
+        let store = Arc::new(FloorpPrefsSyncStore::new(delegate.clone(), None).unwrap());
+        let cancelled_engine = FloorpPrefsEngine::new(store.clone());
+
+        stage(&cancelled_engine, Vec::new()).unwrap();
+        assert!(apply(&cancelled_engine, 210).unwrap().len() == 1);
+
+        // The run is cancelled (the engine is dropped without set_uploaded /
+        // sync_finished): nothing may be confirmed and the base must not move.
+        drop(cancelled_engine);
+        assert!(delegate.finishes.lock().is_empty());
+        assert!(store.sync_state().last_modified_millis == 0);
+
+        // A fresh engine on the same store starts a clean session; the base
+        // advances only after its own confirmation.
+        delegate.plans.lock().push_back(no_upload(b"fresh-proof"));
+        let fresh_engine = FloorpPrefsEngine::new(store.clone());
+        stage(
+            &fresh_engine,
+            vec![target(210, serde_json::json!({ CONTROL_PREF_NAME: true }))],
+        )
+        .unwrap();
+        assert!(apply(&fresh_engine, 211).unwrap().is_empty());
+        fresh_engine
+            .set_uploaded(ServerTimestamp(211), Vec::new())
+            .unwrap();
+        fresh_engine.sync_finished().unwrap();
+
+        let finishes = delegate.finishes.lock();
+        assert!(finishes.len() == 1);
+        assert!(finishes[0].transaction_token == b"fresh-proof");
+        assert!(store.sync_state().last_modified_millis == 211);
+    }
 }
