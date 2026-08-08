@@ -396,7 +396,10 @@ jobs:
             > "$probe_response" 2>&1
           probe_exit=$?
           set -e
-          probe_http="$(awk 'NR == 1 { print $2 }' "$probe_response")"
+          # `gh api --include` merges its stderr error line ahead of the HTTP
+          # headers when both are redirected together, so parse the status
+          # from the header line itself instead of the first file line.
+          probe_http="$(grep -m1 '^HTTP/' "$probe_response" | awk '{ print $2 }')"
 
           if [[ "$probe_exit" -eq 0 && "$probe_http" == "200" ]]; then
             gh api \
