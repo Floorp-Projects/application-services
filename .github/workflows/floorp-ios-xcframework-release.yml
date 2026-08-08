@@ -497,6 +497,21 @@ jobs:
               --notes-file "$notes"
           fi
 
+          # The releases-by-tag endpoint does not return draft releases, so
+          # resolve the draft release by its ID before uploading and verifying
+          # assets. The asset digests are verified again after publication.
+          release_id="$(
+            gh api \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.tag_name == "'"$RELEASE_TAG"'" and .draft == true) | .id' \
+              | head -1
+          )"
+          if [[ -z "$release_id" ]]; then
+            echo "Unable to resolve the draft release $RELEASE_TAG" >&2
+            exit 1
+          fi
+
           gh release upload "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber \
@@ -508,7 +523,7 @@ jobs:
 
           gh api \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$remote_json"
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$remote_json"
           verify_release_assets draft
 
           # Reduce tag and setting drift windows between preflight and publication.
