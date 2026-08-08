@@ -389,17 +389,16 @@ jobs:
           remote_json="$RUNNER_TEMP/github-release.json"
           probe_response="$RUNNER_TEMP/github-release-probe.txt"
 
-          set +e
-          gh api --include \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-            > "$probe_response" 2>&1
-          probe_exit=$?
-          set -e
-          # `gh api --include` merges its stderr error line ahead of the HTTP
-          # headers when both are redirected together, so parse the status
-          # from the header line itself instead of the first file line.
-          probe_http="$(grep -m1 '^HTTP/' "$probe_response" | awk '{ print $2 }')"
+          # `gh api --include` prints HTTP headers inconsistently across gh
+          # CLI versions when the request fails, so probe the release state
+          # with curl, which reports the HTTP status deterministically.
+          probe_http="$(
+            curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              2> "$probe_response"
+          )"
 
           if [[ "$probe_exit" -eq 0 && "$probe_http" == "200" ]]; then
             gh api \
