@@ -400,7 +400,7 @@ jobs:
               2> "$probe_response"
           )"
 
-          if [[ "$probe_exit" -eq 0 && "$probe_http" == "200" ]]; then
+          if [[ "$probe_http" == "200" ]]; then
             gh api \
               -H "X-GitHub-Api-Version: 2026-03-10" \
               "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$remote_json"
