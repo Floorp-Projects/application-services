@@ -11,7 +11,7 @@ pub use engine::{
     get_registered_sync_engine, FloorpPrefsRemoteNotes, FloorpPrefsSyncDelegate,
     FloorpPrefsSyncFinish, FloorpPrefsSyncPlan, FloorpPrefsSyncPrepareInput, FloorpPrefsSyncState,
     FloorpPrefsSyncStore, CONTROL_PREF_NAME, NOTES_PREF_NAME, PREFS_COLLECTION_NAME,
-    PREFS_RECORD_ID,
+    PREFS_RECORD_ID, TRANSPORT_CONTRACT_VERSION,
 };
 
 uniffi::setup_scaffolding!("floorp_prefs_sync");
