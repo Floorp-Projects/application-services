@@ -18,7 +18,11 @@ use sync15::engine::{
 use sync15::{telemetry, CollectionName, Guid, ServerTimestamp};
 
 pub const PREFS_COLLECTION_NAME: &str = "prefs";
-pub const PREFS_RECORD_ID: &str = "e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0";
+pub const TRANSPORT_CONTRACT_VERSION: &str = "floorp-prefs-sync-v2-padded-record-id";
+// Desktop derives this by Base64URL-encoding Firefox's application ID. Gecko's
+// encoder keeps padding by default, so the trailing `=` is part of the Sync
+// record ID and must not be stripped.
+pub const PREFS_RECORD_ID: &str = "e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0=";
 pub const NOTES_PREF_NAME: &str = "floorp.browser.note.memos";
 pub const CONTROL_PREF_NAME: &str = "services.sync.prefs.sync.floorp.browser.note.memos";
 
@@ -1420,8 +1424,28 @@ mod tests {
         assert!(request.full);
         let ids = request.ids.unwrap();
         assert!(ids.len() == 1);
-        assert!(ids[0].as_str() == PREFS_RECORD_ID);
+        assert_eq!(
+            ids[0].as_str(),
+            "e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0="
+        );
+        assert_ne!(
+            ids[0].as_str(),
+            "e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0"
+        );
         assert!(request.newer.is_none());
+    }
+
+    #[test]
+    fn desktop_record_id_keeps_base64url_padding() {
+        assert_eq!(
+            TRANSPORT_CONTRACT_VERSION,
+            "floorp-prefs-sync-v2-padded-record-id"
+        );
+        assert_eq!(
+            PREFS_RECORD_ID,
+            "e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0="
+        );
+        assert!(PREFS_RECORD_ID.ends_with('='));
     }
 
     #[test]

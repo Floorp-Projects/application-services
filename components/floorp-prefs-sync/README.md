@@ -4,9 +4,11 @@ This component transports Floorp Notes through Firefox Sync's encrypted
 `prefs` collection. It is wire-compatible with Desktop's preferences engine:
 
 - collection: `prefs`
+- transport contract: `floorp-prefs-sync-v2-padded-record-id`
 - `meta/global` engine version: `2` (already declared by `sync15`)
 - Firefox application record ID:
-  `e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0`
+  `e2VjODAzMGY3LWMyMGEtNDY0Zi05YjBlLTEzYTNhOWU5NzM4NH0=`
+  (Base64URL padding is significant and matches Desktop)
 - Notes value: `floorp.browser.note.memos`
 - control value:
   `services.sync.prefs.sync.floorp.browser.note.memos = true`
