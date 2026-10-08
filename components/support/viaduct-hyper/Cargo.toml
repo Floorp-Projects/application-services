@@ -12,8 +12,16 @@ crate-type = ["lib"]
 async-trait = "0.1"
 error-support = { path = "../error" }
 viaduct = { path = "../../viaduct" }
-hyper = { version = "0.14", features = ["client", "http1", "http2", "tcp"] }
-hyper-tls = { version = "0.5", features = ["vendored"] }
+bytes = "1"
+# Keep transitive hyper consumers above the RUSTSEC-2026-0258 patched floor.
+h2 = "0.4.16"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+hyper-tls = { version = "0.6", features = ["vendored"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 uniffi = { version = "0.31" }
 url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "io-util", "net"] }

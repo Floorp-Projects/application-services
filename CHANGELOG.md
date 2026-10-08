@@ -4,6 +4,10 @@
 
 ## ✨ What's Changed ✨
 
+### Viaduct (Floorp iOS)
+
+- Update the Rust HTTP backend to hyper 1 and patched h2 (RUSTSEC-2026-0258), preserving the existing Swift initializer and request settings.
+
 ### Autofill
 
 - Add `Store::shutdown()`, which closes the database connection early so it happens before Firefox Desktop's late-write shutdown barrier rather than during GC. Operations after shutdown return `DatabaseClosed`. ([Bug 2050036](https://bugzilla.mozilla.org/show_bug.cgi?id=2050036))

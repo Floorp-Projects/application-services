@@ -15,8 +15,9 @@ the details of which are reproduced below.
 * [MIT License: generic-array](#mit-license-generic-array)
 * [MIT License: goblin](#mit-license-goblin)
 * [MIT License: h2](#mit-license-h2)
-* [MIT License: http-body](#mit-license-http-body)
+* [MIT License: http-body, http-body-util](#mit-license-http-body-http-body-util)
 * [MIT License: hyper](#mit-license-hyper)
+* [MIT License: hyper-util](#mit-license-hyper-util)
 * [MIT License: libsqlite3-sys, rusqlite](#mit-license-libsqlite3-sys-rusqlite)
 * [MIT License: mio](#mit-license-mio)
 * [MIT License: nom](#mit-license-nom)
@@ -458,6 +459,7 @@ The following text applies to code linked from these dependencies:
 [askama_derive](https://github.com/askama-rs/askama),
 [askama_parser](https://github.com/askama-rs/askama),
 [async-trait](https://github.com/dtolnay/async-trait),
+[atomic-waker](https://github.com/smol-rs/atomic-waker),
 [autocfg](https://github.com/cuviper/autocfg),
 [base64](https://github.com/marshallpierce/rust-base64),
 [basic-toml](https://github.com/dtolnay/basic-toml),
@@ -505,7 +507,6 @@ The following text applies to code linked from these dependencies:
 [hex](https://github.com/KokaKiwi/rust-hex),
 [http](https://github.com/hyperium/http),
 [httparse](https://github.com/seanmonstar/httparse),
-[httpdate](https://github.com/pyfisch/httpdate),
 [hyper-tls](https://github.com/hyperium/hyper-tls),
 [iana-time-zone](https://github.com/strawlab/iana-time-zone),
 [id-arena](https://github.com/fitzgen/id-arena),
@@ -577,7 +578,6 @@ The following text applies to code linked from these dependencies:
 [thiserror-impl](https://github.com/dtolnay/thiserror),
 [thiserror](https://github.com/dtolnay/thiserror),
 [thread_local](https://github.com/Amanieu/thread_local-rs),
-[toml](https://github.com/alexcrichton/toml-rs),
 [toml](https://github.com/toml-rs/toml),
 [toml_datetime](https://github.com/toml-rs/toml),
 [toml_parser](https://github.com/toml-rs/toml),
@@ -1082,13 +1082,14 @@ DEALINGS IN THE SOFTWARE.
 
 ```
 -------------
-## MIT License: http-body
+## MIT License: http-body, http-body-util
 
 The following text applies to code linked from these dependencies:
+[http-body-util](https://github.com/hyperium/http-body),
 [http-body](https://github.com/hyperium/http-body)
 
 ```
-Copyright (c) 2019 Hyper Contributors
+Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -1122,7 +1123,35 @@ The following text applies to code linked from these dependencies:
 [hyper](https://github.com/hyperium/hyper)
 
 ```
-Copyright (c) 2014-2021 Sean McArthur
+Copyright (c) 2014-2026 Sean McArthur
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+```
+-------------
+## MIT License: hyper-util
+
+The following text applies to code linked from these dependencies:
+[hyper-util](https://github.com/hyperium/hyper-util)
+
+```
+Copyright (c) 2023-2025 Sean McArthur
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

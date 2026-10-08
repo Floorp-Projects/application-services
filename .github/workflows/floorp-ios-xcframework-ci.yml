@@ -181,6 +181,8 @@ jobs:
         run: |
           cargo test --locked --package floorp-prefs-sync
           cargo test --locked --package sync_manager --tests
+          cargo test --locked --package viaduct-hyper
+          cargo test --locked --package nimbus-cli output::server::tests
           cargo check --locked --package megazord_ios
 
   ios-artifacts:

@@ -12,7 +12,10 @@
 
 use std::{sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use error_support::info;
+use http_body_util::{BodyExt, Full};
+use hyper_util::{client::legacy, rt::TokioExecutor};
 use tokio::time::timeout;
 use url::Url;
 
@@ -21,8 +24,8 @@ use viaduct::{
     Response, Result, ViaductError,
 };
 
-type Connector = hyper_tls::HttpsConnector<hyper::client::connect::HttpConnector>;
-type Client = hyper::client::Client<Connector, hyper::Body>;
+type Connector = hyper_tls::HttpsConnector<legacy::connect::HttpConnector>;
+type Client = legacy::Client<Connector, Full<Bytes>>;
 
 struct HyperBackend {
     runtime: tokio::runtime::Runtime,
@@ -45,7 +48,7 @@ pub fn viaduct_init_backend_hyper() {
         .build()
         .unwrap();
     let https_connector = hyper_tls::HttpsConnector::new();
-    let client = hyper::Client::<()>::builder().build(https_connector);
+    let client = legacy::Client::builder(TokioExecutor::new()).build(https_connector);
     let backend = Arc::new(HyperBackend { runtime, client });
     init_backend(backend)
 }
@@ -156,15 +159,15 @@ async fn make_single_request(
             Method::Patch => hyper::Method::PATCH,
         });
     for h in request.headers.into_vec() {
-        let name = hyper::http::HeaderName::from_bytes(h.name.as_bytes()).map_backend_error()?;
-        let value = hyper::http::HeaderValue::from_str(&h.value).map_backend_error()?;
+        let name = hyper::header::HeaderName::from_bytes(h.name.as_bytes()).map_backend_error()?;
+        let value = hyper::header::HeaderValue::from_str(&h.value).map_backend_error()?;
         builder.headers_mut().unwrap().insert(name, value);
     }
     let req = builder
-        .body(hyper::Body::from(request.body.unwrap_or_default()))
+        .body(Full::new(Bytes::from(request.body.unwrap_or_default())))
         .map_backend_error()?;
     let (parts, body) = client.request(req).await.map_backend_error()?.into_parts();
-    let body = hyper::body::to_bytes(body).await.map_backend_error()?;
+    let body = body.collect().await.map_backend_error()?.to_bytes();
     Ok(hyper::Response::from_parts(parts, body.to_vec()))
 }
 
@@ -181,3 +184,6 @@ fn convert_url(url: Url) -> Result<hyper::Uri> {
 }
 
 uniffi::setup_scaffolding!();
+
+#[cfg(test)]
+mod tests;
