@@ -1,0 +1,19 @@
+[package]
+name = "floorp-workspaces-sync"
+version = "0.1.0"
+authors = ["Floorp Project <support@floorp.app>"]
+edition = "2021"
+license = "MPL-2.0"
+
+[dependencies]
+anyhow = "1"
+parking_lot = ">=0.11,<=0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sync15 = { path = "../sync15", features = ["sync-engine"] }
+thiserror = "2"
+uniffi = "0.31"
+url = "2.2"
+
+[dev-dependencies]
+tempfile = "3"

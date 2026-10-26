@@ -65,6 +65,7 @@ class FloorpIOSWorkflowTests(unittest.TestCase):
             ".github/workflows/floorp-ios-xcframework-ci.yml",
             "automation/floorp/README.md",
             "components/floorp-prefs-sync/src/lib.rs",
+            "components/floorp-workspaces-sync/src/lib.rs",
             "libs/build-all.sh",
             "megazords/ios-rust/generate-files.sh",
             "tools/uniffi-bindgen-library-mode/src/main.rs",
@@ -134,6 +135,22 @@ class FloorpIOSWorkflowTests(unittest.TestCase):
         )
         self.assertIn("--upstream-ref origin/main", self.ci)
         self.assertIn("FLOORP_IOS_UPSTREAM_REF: origin/main", self.ci)
+
+    def test_ci_checks_workspace_engine_and_read_only_sync_transport(self):
+        rust_contracts = self.ci.split("\n  rust-contracts:", 1)[1].split(
+            "\n  ios-artifacts:", 1
+        )[0]
+        clippy = rust_contracts.split("cargo clippy --locked", 1)[1].split(
+            "--all-targets -- -D warnings", 1
+        )[0]
+        self.assertIn("--package floorp-workspaces-sync", clippy)
+        self.assertIn(
+            "cargo test --locked --package floorp-workspaces-sync", rust_contracts
+        )
+        self.assertIn(
+            "cargo test --locked --package sync15 --features sync-client",
+            rust_contracts,
+        )
 
     def test_release_requires_exact_branch_baseline_and_event_identity(self):
         for contract in (

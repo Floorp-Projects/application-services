@@ -156,6 +156,27 @@ impl<'state> LocalCollStateMachine<'state> {
         global_state: &'state GlobalState,
         root_key: &'state KeyBundle,
     ) -> error::Result<Option<CollState>> {
+        // This must precede get_sync_assoc and, in particular, every reset.
+        // floorp-workspaces is intentionally absent from DEFAULT_ENGINES, so
+        // this is the server definition rather than a generated fallback.
+        let name = engine.collection_name();
+        let version = if global_state
+            .global
+            .declined
+            .iter()
+            .any(|v| v == name.as_ref())
+        {
+            None
+        } else {
+            global_state
+                .global
+                .engines
+                .get(name.as_ref())
+                .map(|meta| meta.version)
+        };
+        if !engine.validate_remote_engine(version)? {
+            return Ok(None);
+        }
         let mut gingerbread_man = Self {
             global_state,
             root_key,
@@ -212,6 +233,8 @@ mod tests {
         collection_name: &'static str,
         assoc: Cell<EngineSyncAssociation>,
         num_resets: RefCell<usize>,
+        required_version: Option<usize>,
+        preflights: RefCell<Vec<Option<usize>>>,
     }
 
     impl TestSyncEngine {
@@ -220,6 +243,8 @@ mod tests {
                 collection_name,
                 assoc: Cell::new(assoc),
                 num_resets: RefCell::new(0),
+                required_version: None,
+                preflights: RefCell::new(Vec::new()),
             }
         }
         fn get_num_resets(&self) -> usize {
@@ -228,6 +253,13 @@ mod tests {
     }
 
     impl SyncEngine for TestSyncEngine {
+        fn validate_remote_engine(&self, version: Option<usize>) -> Result<bool> {
+            self.preflights.borrow_mut().push(version);
+            Ok(self
+                .required_version
+                .is_none_or(|required| version == Some(required)))
+        }
+
         fn collection_name(&self) -> CollectionName {
             self.collection_name.into()
         }
@@ -364,5 +396,30 @@ mod tests {
         let cs = LocalCollStateMachine::get_state(&engine, &gs, &root_key).expect("should work");
         assert!(cs.is_none(), "declined collection can sync");
         assert_eq!(engine.get_num_resets(), 0);
+    }
+    #[test]
+    fn version_preflight_rejects_absent_old_future_before_association_reset() {
+        ensure_initialized();
+        let key = KeyBundle::new_random().unwrap();
+        for version in [None, Some(0), Some(1), Some(2)] {
+            let mut global = get_global_state(&key);
+            global.global.engines.clear();
+            if let Some(version) = version {
+                global.global.engines.insert(
+                    "floorp-workspaces".into(),
+                    MetaGlobalEngine {
+                        version,
+                        sync_id: "workspace-id".into(),
+                    },
+                );
+            }
+            let mut engine =
+                TestSyncEngine::new("floorp-workspaces", EngineSyncAssociation::Disconnected);
+            engine.required_version = Some(1);
+            let result = LocalCollStateMachine::get_state(&engine, &global, &key).unwrap();
+            assert_eq!(result.is_some(), version == Some(1));
+            assert_eq!(engine.get_num_resets(), usize::from(version == Some(1)));
+            assert_eq!(*engine.preflights.borrow(), vec![version]);
+        }
     }
 }

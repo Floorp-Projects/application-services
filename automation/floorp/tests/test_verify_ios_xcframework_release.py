@@ -74,7 +74,7 @@ class ReleaseVerifierTests(unittest.TestCase):
                     else b"simulator"
                 )
                 umbrella = (
-                    '#import "floorp_prefs_syncFFI.h"\n' if include_floorp else ""
+                    '#import "floorp_prefs_syncFFI.h"\n#import "floorp_workspaces_syncFFI.h"\n' if include_floorp else ""
                 )
                 archive.writestr(f"{framework_root}/{framework_name}", binary)
                 archive.writestr(
@@ -89,7 +89,7 @@ class ReleaseVerifierTests(unittest.TestCase):
                 if include_modulemap:
                     modulemap_headers = ["RustViaductFFI.h"]
                     if include_floorp:
-                        modulemap_headers.append("floorp_prefs_syncFFI.h")
+                        modulemap_headers.extend(["floorp_prefs_syncFFI.h", "floorp_workspaces_syncFFI.h"])
                     modulemap_headers.append("nimbusFFI.h")
                     modulemap_headers = [
                         header
@@ -119,6 +119,11 @@ class ReleaseVerifierTests(unittest.TestCase):
                         f"uint32_t {VERIFIER.FLOORP_CONTRACT_SYMBOL}(void);\n",
                     )
 
+                    archive.writestr(
+                        f"{framework_root}/Headers/floorp_workspaces_syncFFI.h",
+                        f"uint32_t {VERIFIER.WORKSPACES_CONTRACT_SYMBOL}(void);\n",
+                    )
+
     @staticmethod
     def inspection(binary, minos="15.0", include_floorp=True):
         simulator = binary == b"simulator"
@@ -133,7 +138,7 @@ class ReleaseVerifierTests(unittest.TestCase):
             ],
             "symbols_by_architecture": {
                 architecture: (
-                    {VERIFIER.FLOORP_CONTRACT_SYMBOL} if include_floorp else set()
+                    {VERIFIER.FLOORP_CONTRACT_SYMBOL, VERIFIER.WORKSPACES_CONTRACT_SYMBOL} if include_floorp else set()
                 )
                 for architecture in architectures
             },
@@ -156,6 +161,8 @@ class ReleaseVerifierTests(unittest.TestCase):
                 "swift-components/all/Generated/floorp_prefs_syncFFI.h",
                 b"generated",
             ),
+            ("swift-components/all/Generated/floorp_workspaces_sync.swift", b"generated"),
+            ("swift-components/all/Generated/floorp_workspaces_syncFFI.h", b"generated"),
             ("swift-components/focus/Generated/nimbus.swift", b"generated"),
         ]
         if include_syncmanager:
@@ -571,6 +578,7 @@ class ReleaseVerifierTests(unittest.TestCase):
                         "sync15.swift",
                         "syncmanager.swift",
                         "floorp_prefs_sync.swift",
+                        "floorp_workspaces_sync.swift",
                     ],
                 )
                 self.assertIn(": FloorpPrefsSyncDelegate", smoke)
@@ -586,6 +594,11 @@ class ReleaseVerifierTests(unittest.TestCase):
                 self.assertIn("FloorpPrefsSyncStore(delegate:", smoke)
                 self.assertIn("store.syncState()", smoke)
                 self.assertIn("store.registerWithSyncManager()", smoke)
+                self.assertIn("FloorpWorkspacesStore(path:", smoke)
+                self.assertIn("workspaces.bindAccount(uid:", smoke)
+                self.assertIn("workspaces.snapshotJson()", smoke)
+                self.assertIn("workspaces.copyEligibilityJson()", smoke)
+                self.assertIn("workspaces.invalidate()", smoke)
                 self.assertIn("let manager = SyncManager()", smoke)
                 self.assertIn("manager.disconnect()", smoke)
                 self.assertIn("try manager.disconnectChecked()", smoke)

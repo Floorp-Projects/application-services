@@ -23,6 +23,8 @@ const STORAGE_VERSION: usize = 5;
 /// `meta/global` record. We include engines that we don't implement
 /// because they'll be disabled on other clients if we omit them
 /// (bug 1479929).
+// `floorp-workspaces` is intentionally absent. iOS only discovers an engine
+// published by Desktop and must never synthesize its version or syncID.
 const DEFAULT_ENGINES: &[(&str, usize)] = &[
     ("passwords", 1),
     ("clients", 1),
@@ -239,6 +241,7 @@ pub struct SetupStateMachine<'a> {
     // We should almost certainly remove this and instead allow for a "time
     // budget", after which we get interrupted. Later...
     allowed_states: Vec<&'static str>,
+    read_only: bool,
     sequence: Vec<&'static str>,
     engine_updates: Option<&'a HashMap<String, bool>>,
     interruptee: &'a dyn Interruptee,
@@ -274,6 +277,20 @@ impl<'a> SetupStateMachine<'a> {
         )
     }
 
+    /// Discovery must never repair missing/corrupt account setup by wiping
+    /// storage. It also leaves the fetched meta/global unmodified, preserving
+    /// the exact engine definitions supplied by the publishing client.
+    pub fn for_read_only_sync(
+        client: &'a dyn SetupStorageClient,
+        root_key: &'a KeyBundle,
+        pgs: &'a mut PersistedGlobalState,
+        interruptee: &'a dyn Interruptee,
+    ) -> SetupStateMachine<'a> {
+        let mut machine = Self::for_full_sync(client, root_key, pgs, None, interruptee);
+        machine.read_only = true;
+        machine
+    }
+
     fn with_allowed_states(
         client: &'a dyn SetupStorageClient,
         root_key: &'a KeyBundle,
@@ -288,6 +305,7 @@ impl<'a> SetupStateMachine<'a> {
             pgs,
             sequence: Vec::new(),
             allowed_states,
+            read_only: false,
             engine_updates,
             interruptee,
             changes_needed: None,
@@ -353,6 +371,16 @@ impl<'a> SetupStateMachine<'a> {
                         if global.storage_version < STORAGE_VERSION {
                             Ok(FreshStartRequired { config })
                         } else {
+                            if self.read_only {
+                                self.pgs.set_declined(global.declined.clone());
+                                self.changes_needed = Some(EngineChangesNeeded::default());
+                                return Ok(InitialWithMetaGlobal {
+                                    config,
+                                    collections,
+                                    global,
+                                    global_timestamp,
+                                });
+                            }
                             info!(
                                 "Have info/collections and meta/global. Computing new engine states"
                             );
@@ -487,6 +515,11 @@ impl<'a> SetupStateMachine<'a> {
             Ready { state } => Ok(Ready { state }),
 
             FreshStartRequired { config } => {
+                // A discovery refresh must not erase account storage because
+                // meta/global/keys are absent or the storage schema is old.
+                if self.read_only {
+                    return Err(ErrorKind::SetupRequired);
+                }
                 // Wipe the server.
                 info!("Fresh start: wiping remote");
                 self.client.wipe_all_remote()?;
@@ -1088,6 +1121,28 @@ mod tests {
                     remote_wipes: string_set(&["foo"]),
                 }
             }
+        );
+    }
+    #[test]
+    fn discovery_engine_is_never_provisioned_or_downgraded() {
+        let mut fresh = new_global(&PersistedGlobalState::default());
+        assert!(!fresh.engines.contains_key("floorp-workspaces"));
+        fresh.engines.remove("tabs");
+        assert!(fixup_meta_global(&mut fresh));
+        assert!(!fresh.engines.contains_key("floorp-workspaces"));
+        fresh.engines.insert(
+            "floorp-workspaces".into(),
+            MetaGlobalEngine {
+                version: 2,
+                sync_id: "future-workspaces".into(),
+            },
+        );
+        fresh.engines.remove("tabs");
+        assert!(fixup_meta_global(&mut fresh));
+        assert_eq!(fresh.engines["floorp-workspaces"].version, 2);
+        assert_eq!(
+            fresh.engines["floorp-workspaces"].sync_id,
+            Guid::new("future-workspaces")
         );
     }
 }

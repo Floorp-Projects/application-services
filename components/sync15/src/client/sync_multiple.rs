@@ -7,7 +7,9 @@
 
 use super::state::{EngineChangesNeeded, GlobalState, PersistedGlobalState, SetupStateMachine};
 use super::status::{ServiceStatus, SyncResult};
-use super::storage_client::{BackoffListener, Sync15StorageClient, Sync15StorageClientInit};
+use super::storage_client::{
+    BackoffListener, SetupStorageClient, Sync15StorageClient, Sync15StorageClientInit,
+};
 use crate::KeyBundle;
 use crate::clients_engine::{self, CLIENTS_TTL_REFRESH, CommandProcessor};
 use crate::engine::{EngineSyncAssociation, SyncEngine};
@@ -182,6 +184,21 @@ pub struct SyncRequestInfo<'a> {
     pub is_user_action: bool,
 }
 
+fn setup_state_machine_for_engines<'a>(
+    engines: &[&dyn SyncEngine],
+    client: &'a dyn SetupStorageClient,
+    key: &'a KeyBundle,
+    pgs: &'a mut PersistedGlobalState,
+    changes: Option<&'a HashMap<String, bool>>,
+    interruptee: &'a dyn Interruptee,
+) -> SetupStateMachine<'a> {
+    if !engines.is_empty() && engines.iter().all(|engine| engine.is_read_only()) {
+        SetupStateMachine::for_read_only_sync(client, key, pgs, interruptee)
+    } else {
+        SetupStateMachine::for_full_sync(client, key, pgs, changes, interruptee)
+    }
+}
+
 // The sync multiple driver
 struct SyncMultipleDriver<'info, 'res, 'pgs, 'mcs> {
     command_processor: Option<&'info dyn CommandProcessor>,
@@ -201,6 +218,16 @@ struct SyncMultipleDriver<'info, 'res, 'pgs, 'mcs> {
 impl SyncMultipleDriver<'_, '_, '_, '_> {
     /// The actual worker for sync_multiple.
     fn sync(mut self) -> result::Result<(), Error> {
+        if self.engines.iter().any(|engine| {
+            engine.is_read_only()
+                && self
+                    .engines_to_state_change
+                    .is_some_and(|changes| changes.contains_key(engine.collection_name().as_ref()))
+        }) {
+            return Err(
+                anyhow::anyhow!("read-only engine enablement cannot change remote state").into(),
+            );
+        }
         info!("Loading/initializing persisted state");
         let mut pgs = self.prepare_persisted_state();
 
@@ -215,6 +242,11 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
         // Advance the state machine to the point where it can perform a full
         // sync. This may involve uploading meta/global, crypto/keys etc.
         let mut global_state = self.run_state_machine(&client_info, &mut pgs)?;
+
+        // Withdraw stale discovery eligibility from confirmed control state
+        // before clients sync, backoff, or interruption can defer collection
+        // downloads. This preflight performs no HTTP requests.
+        self.preflight_read_only_engines(&global_state);
 
         if self.was_interrupted() {
             return Ok(());
@@ -284,6 +316,24 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
         }
     }
 
+    fn preflight_read_only_engines(&mut self, global_state: &GlobalState) {
+        for engine in self.engines.iter().filter(|engine| engine.is_read_only()) {
+            let name = engine.collection_name();
+            match super::LocalCollStateMachine::get_state(*engine, global_state, self.root_sync_key)
+            {
+                Ok(Some(_)) => {}
+                // Missing/unsupported/declined definitions have already been
+                // durably withdrawn by the provider, without any GET/POST.
+                Ok(None) => {
+                    self.result.engine_results.insert(name.into(), Ok(()));
+                }
+                Err(error) => {
+                    self.result.engine_results.insert(name.into(), Err(error));
+                }
+            }
+        }
+    }
+
     fn sync_engines(
         &mut self,
         client_info: &ClientInfo,
@@ -293,6 +343,16 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
         let mut telem_sync = telemetry::SyncTelemetry::new();
         for engine in self.engines {
             let name = engine.collection_name();
+            if engine.is_read_only()
+                && let Some(outcome) = self.result.engine_results.get(name.as_ref())
+            {
+                let mut telem_engine = telemetry::Engine::new(name.as_ref());
+                if let Err(error) = outcome {
+                    telem_engine.failure(error);
+                }
+                telem_sync.engine(telem_engine);
+                continue;
+            }
             if self
                 .backoff
                 .get_required_wait(self.ignore_soft_backoff)
@@ -301,7 +361,7 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
                 warn!("Got backoff, bailing out of sync early");
                 break;
             }
-            if global_state.global.declined.iter().any(|e| e == &*name) {
+            if !engine.is_read_only() && global_state.global.declined.iter().any(|e| e == &*name) {
                 info!("The {} engine is declined. Skipping", name);
                 continue;
             }
@@ -355,7 +415,8 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
     ) -> result::Result<GlobalState, Error> {
         let last_state = self.mem_cached_state.last_global_state.take();
 
-        let mut state_machine = SetupStateMachine::for_full_sync(
+        let mut state_machine = setup_state_machine_for_engines(
+            self.engines,
             &client_info.client,
             self.root_sync_key,
             pgs,
@@ -385,6 +446,11 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
         }
         let state = match res {
             Err(e) => {
+                if matches!(&e, Error::SetupRequired | Error::ClientUpgradeRequired) {
+                    for engine in self.engines.iter().filter(|engine| engine.is_read_only()) {
+                        engine.sync_setup_unavailable()?;
+                    }
+                }
                 self.result.service_status = ServiceStatus::from_err(&e);
                 return Err(e);
             }
@@ -411,7 +477,10 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
 
         for s in self.engines {
             let name = s.collection_name();
-            if changes.local_resets.contains(&*name) {
+            // Read-only providers withdraw their cache through version
+            // preflight, rather than resetting before validating the remote
+            // definition (which may be absent or unsupported).
+            if !s.is_read_only() && changes.local_resets.contains(&*name) {
                 info!("Resetting engine {}, as it was declined remotely", name);
                 s.reset(&EngineSyncAssociation::Disconnected)?;
             }
@@ -486,5 +555,292 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
                 PersistedGlobalState::default()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod read_only_driver_tests {
+    use super::super::request::{InfoCollections, InfoConfiguration};
+    use super::super::{CollectionKeys, Sync15ClientResponse};
+    use super::*;
+    use crate::bso::{
+        IncomingBso, IncomingEncryptedBso, IncomingEnvelope, OutgoingBso, OutgoingEncryptedBso,
+    };
+    use crate::engine::CollectionRequest;
+    use crate::record_types::{MetaGlobalEngine, MetaGlobalRecord};
+    use crate::{CollectionName, Guid, ServerTimestamp};
+    use interrupt_support::NeverInterrupts;
+    use std::cell::{Cell, RefCell};
+    struct Engine {
+        readonly: bool,
+        ready: Cell<bool>,
+        preflights: RefCell<Vec<Option<usize>>>,
+    }
+    impl SyncEngine for Engine {
+        fn collection_name(&self) -> CollectionName {
+            "floorp-workspaces".into()
+        }
+        fn is_read_only(&self) -> bool {
+            self.readonly
+        }
+        fn validate_remote_engine(&self, version: Option<usize>) -> anyhow::Result<bool> {
+            self.preflights.borrow_mut().push(version);
+            if version != Some(1) {
+                self.ready.set(false);
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        fn stage_incoming(
+            &self,
+            _: Vec<IncomingBso>,
+            _: &mut telemetry::Engine,
+        ) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn apply(
+            &self,
+            _: ServerTimestamp,
+            _: &mut telemetry::Engine,
+        ) -> anyhow::Result<Vec<OutgoingBso>> {
+            unreachable!()
+        }
+        fn set_uploaded(&self, _: ServerTimestamp, _: Vec<Guid>) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn get_collection_request(
+            &self,
+            _: ServerTimestamp,
+        ) -> anyhow::Result<Option<CollectionRequest>> {
+            unreachable!()
+        }
+        fn get_sync_assoc(&self) -> anyhow::Result<EngineSyncAssociation> {
+            panic!("declined discovery must be rejected before association lookup")
+        }
+        fn reset(&self, _: &EngineSyncAssociation) -> anyhow::Result<()> {
+            unreachable!()
+        }
+        fn wipe(&self) -> anyhow::Result<()> {
+            unreachable!()
+        }
+    }
+    fn engine(readonly: bool) -> Engine {
+        Engine {
+            readonly,
+            ready: Cell::new(true),
+            preflights: RefCell::new(Vec::new()),
+        }
+    }
+    fn global(key: &KeyBundle) -> GlobalState {
+        GlobalState {
+            config: InfoConfiguration::default(),
+            collections: InfoCollections::default(),
+            global: MetaGlobalRecord {
+                sync_id: "global-sync-id".into(),
+                storage_version: 5,
+                engines: HashMap::from([(
+                    "floorp-workspaces".into(),
+                    MetaGlobalEngine {
+                        version: 1,
+                        sync_id: "collection-sync-id".into(),
+                    },
+                )]),
+                declined: vec![],
+            },
+            global_timestamp: ServerTimestamp(100),
+            keys: CollectionKeys::new_random()
+                .unwrap()
+                .to_encrypted_payload(key)
+                .unwrap(),
+            keys_timestamp: ServerTimestamp(100),
+        }
+    }
+    #[test]
+    fn driver_with_already_persisted_decline_withdraws_ready_discovery_cache() {
+        nss_as::ensure_initialized();
+        let key = KeyBundle::new_random().unwrap();
+        let init = Sync15StorageClientInit {
+            key_id: "kid".into(),
+            access_token: "token".into(),
+            tokenserver_url: "https://example.org/token".parse().unwrap(),
+        };
+        let client = ClientInfo::new(&init).unwrap();
+        let discovery = engine(true);
+        let engines: [&dyn SyncEngine; 1] = [&discovery];
+        let mut global = global(&key);
+        global.global.declined.push("floorp-workspaces".into());
+        // This reproduces a tabs-only run already having persisted the decline.
+        let mut pgs = Some(
+            serde_json::to_string(&PersistedGlobalState::V2 {
+                declined: Some(vec!["floorp-workspaces".into()]),
+            })
+            .unwrap(),
+        );
+        let mut cache = MemoryCachedState::default();
+        let mut result = SyncResult {
+            service_status: ServiceStatus::Ok,
+            result: Ok(()),
+            declined: None,
+            next_sync_after: None,
+            engine_results: HashMap::new(),
+            telemetry: telemetry::SyncTelemetryPing::new(),
+        };
+        let mut driver = SyncMultipleDriver {
+            command_processor: None,
+            engines: &engines,
+            storage_init: &init,
+            root_sync_key: &key,
+            interruptee: &NeverInterrupts,
+            backoff: super::super::storage_client::new_backoff_listener(),
+            engines_to_state_change: None,
+            result: &mut result,
+            persisted_global_state: &mut pgs,
+            mem_cached_state: &mut cache,
+            ignore_soft_backoff: false,
+            saw_auth_error: false,
+        };
+        driver.preflight_read_only_engines(&global);
+        driver.backoff.note_backoff(60);
+        driver.sync_engines(&client, &mut global, None);
+        assert!(!discovery.ready.get());
+        assert_eq!(*discovery.preflights.borrow(), vec![None]);
+        assert!(
+            result
+                .engine_results
+                .get("floorp-workspaces")
+                .unwrap()
+                .is_ok()
+        );
+    }
+    struct SetupTransport {
+        state: GlobalState,
+        missing_meta: bool,
+        missing_keys: bool,
+        writes: RefCell<Vec<&'static str>>,
+    }
+    fn success<T>(record: T) -> Result<Sync15ClientResponse<T>, Error> {
+        Ok(Sync15ClientResponse::Success {
+            status: 200,
+            record,
+            last_modified: ServerTimestamp(100),
+            route: "mock".into(),
+        })
+    }
+    impl SetupStorageClient for SetupTransport {
+        fn fetch_info_configuration(
+            &self,
+        ) -> Result<Sync15ClientResponse<InfoConfiguration>, Error> {
+            success(self.state.config.clone())
+        }
+        fn fetch_info_collections(&self) -> Result<Sync15ClientResponse<InfoCollections>, Error> {
+            success(self.state.collections.clone())
+        }
+        fn fetch_meta_global(&self) -> Result<Sync15ClientResponse<MetaGlobalRecord>, Error> {
+            if self.missing_meta {
+                Ok(Sync15ClientResponse::Error(
+                    crate::error::ErrorResponse::NotFound {
+                        route: "meta/global".into(),
+                    },
+                ))
+            } else {
+                success(self.state.global.clone())
+            }
+        }
+        fn fetch_crypto_keys(&self) -> Result<Sync15ClientResponse<IncomingEncryptedBso>, Error> {
+            if self.missing_keys {
+                Ok(Sync15ClientResponse::Error(
+                    crate::error::ErrorResponse::NotFound {
+                        route: "crypto/keys".into(),
+                    },
+                ))
+            } else {
+                success(IncomingEncryptedBso::new(
+                    IncomingEnvelope {
+                        id: Guid::new("keys"),
+                        modified: ServerTimestamp(100),
+                        sortindex: None,
+                        ttl: None,
+                    },
+                    self.state.keys.clone(),
+                ))
+            }
+        }
+        fn put_meta_global(
+            &self,
+            _: ServerTimestamp,
+            _: &MetaGlobalRecord,
+        ) -> Result<ServerTimestamp, Error> {
+            self.writes.borrow_mut().push("PUT meta/global");
+            Err(Error::SetupRequired)
+        }
+        fn put_crypto_keys(
+            &self,
+            _: ServerTimestamp,
+            _: &OutgoingEncryptedBso,
+        ) -> Result<(), Error> {
+            self.writes.borrow_mut().push("PUT crypto/keys");
+            Err(Error::SetupRequired)
+        }
+        fn wipe_all_remote(&self) -> Result<(), Error> {
+            self.writes.borrow_mut().push("DELETE storage");
+            Err(Error::SetupRequired)
+        }
+    }
+    #[test]
+    fn discovery_only_driver_setup_never_wipes_or_repairs_account_storage() {
+        nss_as::ensure_initialized();
+        let key = KeyBundle::new_random().unwrap();
+        let discovery = engine(true);
+        for case in ["missing-meta", "missing-keys", "old-storage", "ready"] {
+            let mut state = global(&key);
+            if case == "old-storage" {
+                state.global.storage_version = 4;
+            }
+            let transport = SetupTransport {
+                state,
+                missing_meta: case == "missing-meta",
+                missing_keys: case == "missing-keys",
+                writes: RefCell::new(Vec::new()),
+            };
+            let mut pgs = PersistedGlobalState::default();
+            let mut machine = setup_state_machine_for_engines(
+                &[&discovery],
+                &transport,
+                &key,
+                &mut pgs,
+                None,
+                &NeverInterrupts,
+            );
+            let result = machine.run_to_ready(None);
+            if case == "ready" {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(Error::SetupRequired)));
+            }
+            assert!(
+                transport.writes.borrow().is_empty(),
+                "{case}: unexpected writes {:?}",
+                transport.writes.borrow()
+            );
+        }
+        // The established full-sync policy is preserved for ordinary engines.
+        let ordinary = engine(false);
+        let transport = SetupTransport {
+            state: global(&key),
+            missing_meta: true,
+            missing_keys: false,
+            writes: RefCell::new(Vec::new()),
+        };
+        let mut pgs = PersistedGlobalState::default();
+        let mut machine = setup_state_machine_for_engines(
+            &[&ordinary],
+            &transport,
+            &key,
+            &mut pgs,
+            None,
+            &NeverInterrupts,
+        );
+        assert!(machine.run_to_ready(None).is_err());
+        assert_eq!(*transport.writes.borrow(), vec!["DELETE storage"]);
     }
 }
