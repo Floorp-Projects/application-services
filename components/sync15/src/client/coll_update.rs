@@ -78,10 +78,10 @@ fn check_page_backoff(
     backoff: &super::storage_client::BackoffState,
     request: &CollectionRequest,
 ) -> Result<()> {
-    if request.offset.is_some() {
-        if let Some(wait) = backoff.get_required_wait(false) {
-            return Err(Error::BackoffError(std::time::SystemTime::now() + wait));
-        }
+    if request.offset.is_some()
+        && let Some(wait) = backoff.get_required_wait(false)
+    {
+        return Err(Error::BackoffError(std::time::SystemTime::now() + wait));
     }
     Ok(())
 }

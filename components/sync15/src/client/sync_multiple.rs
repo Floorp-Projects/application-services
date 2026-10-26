@@ -343,15 +343,15 @@ impl SyncMultipleDriver<'_, '_, '_, '_> {
         let mut telem_sync = telemetry::SyncTelemetry::new();
         for engine in self.engines {
             let name = engine.collection_name();
-            if engine.is_read_only() {
-                if let Some(outcome) = self.result.engine_results.get(name.as_ref()) {
-                    let mut telem_engine = telemetry::Engine::new(name.as_ref());
-                    if let Err(error) = outcome {
-                        telem_engine.failure(error);
-                    }
-                    telem_sync.engine(telem_engine);
-                    continue;
+            if engine.is_read_only()
+                && let Some(outcome) = self.result.engine_results.get(name.as_ref())
+            {
+                let mut telem_engine = telemetry::Engine::new(name.as_ref());
+                if let Err(error) = outcome {
+                    telem_engine.failure(error);
                 }
+                telem_sync.engine(telem_engine);
+                continue;
             }
             if self
                 .backoff
