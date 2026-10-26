@@ -296,6 +296,31 @@ impl Sync15StorageClient {
         self.collection_request(Method::Get, collection_request)
     }
 
+    /// Fetch one page with a collection modification fence. Returning the
+    /// offset separately avoids changing the generic response representation.
+    pub(crate) fn get_encrypted_records_page(
+        &self,
+        request: CollectionRequest,
+        boundary: ServerTimestamp,
+    ) -> error::Result<(
+        Sync15ClientResponse<Vec<IncomingEncryptedBso>>,
+        Option<String>,
+    )> {
+        let url = build_collection_request_url(Url::parse(&self.tsc.api_endpoint()?)?, request)?;
+        let req = self
+            .build_request(Method::Get, url)?
+            .header(header_names::X_IF_UNMODIFIED_SINCE, boundary.to_string())?;
+        let response = req.send()?;
+        let offset = response
+            .headers
+            .get(header_names::X_WEAVE_NEXT_OFFSET)
+            .map(str::to_owned);
+        Ok((
+            Sync15ClientResponse::from_response(response, &self.backoff)?,
+            offset,
+        ))
+    }
+
     #[inline]
     fn authorized(&self, req: Request) -> error::Result<Request> {
         let hawk_header_value = self.tsc.authorization(&req)?;
@@ -485,6 +510,9 @@ fn build_collection_request_url(mut base_url: Url, r: CollectionRequest) -> erro
     }
     if let Some(ts) = r.newer {
         pairs.append_pair("newer", &ts.to_string());
+    }
+    if let Some(offset) = &r.offset {
+        pairs.append_pair("offset", offset);
     }
     if let Some(l) = r.limit {
         pairs.append_pair("sort", l.order.as_str());

@@ -173,6 +173,7 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked \
             --package floorp-prefs-sync \
+            --package floorp-workspaces-sync \
             --package sync_manager \
             --package megazord_ios \
             --all-targets -- -D warnings
@@ -180,6 +181,8 @@ jobs:
       - name: Run Floorp engine and manager tests
         run: |
           cargo test --locked --package floorp-prefs-sync
+          cargo test --locked --package floorp-workspaces-sync
+          cargo test --locked --package sync15 --features sync-client
           cargo test --locked --package sync_manager --tests
           cargo check --locked --package megazord_ios
 

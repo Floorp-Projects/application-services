@@ -32,6 +32,12 @@ SWIFT_ARCHIVE = "swift-components.tar.xz"
 MANIFEST = "release-manifest.json"
 CHECKSUMS = "SHA256SUMS"
 FLOORP_CONTRACT_SYMBOL = "ffi_floorp_prefs_sync_uniffi_contract_version"
+WORKSPACES_CONTRACT_SYMBOL = "ffi_floorp_workspaces_sync_uniffi_contract_version"
+WORKSPACES_UNIFFI_CONFIG = REPO_ROOT / "components/floorp-workspaces-sync/uniffi.toml"
+WORKSPACES_SWIFT_BINDING_CONFIG = {
+    "ffi_module_name": "MozillaRustComponents",
+    "ffi_module_filename": "floorp_workspaces_syncFFI",
+}
 FLOORP_UNIFFI_CONFIG = REPO_ROOT / "components/floorp-prefs-sync/uniffi.toml"
 FLOORP_SWIFT_BINDING_CONFIG = {
     "ffi_module_name": "MozillaRustComponents",
@@ -81,6 +87,7 @@ def load_config(path: pathlib.Path) -> dict[str, Any]:
 
 def validate_floorp_uniffi_config(
     path: pathlib.Path = FLOORP_UNIFFI_CONFIG,
+    expected: dict[str, str] = FLOORP_SWIFT_BINDING_CONFIG,
 ) -> dict[str, str]:
     parser = configparser.ConfigParser(
         delimiters=("=",),
@@ -94,19 +101,19 @@ def validate_floorp_uniffi_config(
         raise ValueError(f"could not load Floorp UniFFI config: {path}") from error
     swift = parser["bindings.swift"] if parser.has_section("bindings.swift") else {}
     actual: dict[str, str | None] = {}
-    for key in FLOORP_SWIFT_BINDING_CONFIG:
+    for key in expected:
         raw_value = swift.get(key)
         try:
             value = json.loads(raw_value) if raw_value is not None else None
         except json.JSONDecodeError:
             value = None
         actual[key] = value if isinstance(value, str) else None
-    if actual != FLOORP_SWIFT_BINDING_CONFIG:
+    if actual != expected:
         raise ValueError(
             f"Floorp Swift UniFFI config {actual!r} differs from "
-            f"{FLOORP_SWIFT_BINDING_CONFIG!r}"
+            f"{expected!r}"
         )
-    return FLOORP_SWIFT_BINDING_CONFIG.copy()
+    return expected.copy()
 
 
 def run(*command: str, cwd: pathlib.Path = REPO_ROOT) -> str:
@@ -304,7 +311,10 @@ def validate_source(
     ).read_text(encoding="utf-8")
     if '#import "floorp_prefs_syncFFI.h"' not in umbrella:
         raise ValueError("Floorp preferences FFI is absent from the iOS umbrella header")
+    if '#import "floorp_workspaces_syncFFI.h"' not in umbrella:
+        raise ValueError("Floorp workspace FFI is absent from the iOS umbrella header")
     validate_floorp_uniffi_config()
+    validate_floorp_uniffi_config(WORKSPACES_UNIFFI_CONFIG, WORKSPACES_SWIFT_BINDING_CONFIG)
     return actual_merge_base
 
 
@@ -500,7 +510,8 @@ def validate_modulemap(
     floorp_header = "floorp_prefs_syncFFI.h"
     if require_floorp_binding:
         required_headers.add(floorp_header)
-    elif floorp_header in direct_headers:
+        required_headers.add("floorp_workspaces_syncFFI.h")
+    elif floorp_header in direct_headers or "floorp_workspaces_syncFFI.h" in direct_headers:
         raise ValueError("Focus modulemap unexpectedly contains Floorp preferences FFI")
 
     missing_required = sorted(required_headers - set(direct_headers))
@@ -538,7 +549,7 @@ def validate_swift_imports(
         source_path = extraction_root / "FloorpReleaseImportSmoke.swift"
         source = "import MozillaRustComponents\n"
         if required_symbol:
-            source += f"func floorpReleaseSymbolSmoke() {{ _ = {required_symbol}() }}\n"
+            source += f"func floorpReleaseSymbolSmoke() {{ _ = {required_symbol}(); _ = {WORKSPACES_CONTRACT_SYMBOL}() }}\n"
         source_path.write_text(source, encoding="utf-8")
         checked_targets: list[str] = []
         for library in libraries:
@@ -688,6 +699,22 @@ def validate_xcframework(
                     "Focus unexpectedly contains the Floorp preferences FFI"
                 )
 
+            workspace_ffi = f"{framework_root}/Headers/floorp_workspaces_syncFFI.h"
+            workspace_import = '#import "floorp_workspaces_syncFFI.h"' in umbrella
+            workspace_archs = {
+                arch for arch, symbols in inspection["symbols_by_architecture"].items()
+                if WORKSPACES_CONTRACT_SYMBOL in symbols
+            }
+            if require_floorp_binding:
+                if not workspace_import or workspace_ffi not in names:
+                    raise ValueError(f"Floorp workspace FFI is missing from {variant}")
+                workspace_header = archive.read(workspace_ffi).decode("utf-8")
+                missing_workspace_archs = sorted(expected - workspace_archs)
+                if WORKSPACES_CONTRACT_SYMBOL not in workspace_header or missing_workspace_archs:
+                    raise ValueError(f"Floorp workspace FFI symbol is missing from {variant} architectures: {missing_workspace_archs}")
+            elif workspace_import or workspace_ffi in names or workspace_archs:
+                raise ValueError("Focus unexpectedly contains the Floorp workspace FFI")
+
             recorded_libraries.append(
                 {
                     "variant": variant,
@@ -764,6 +791,8 @@ def validate_swift_archive_members(
     required = {
         "swift-components/all/Generated/floorp_prefs_sync.swift",
         "swift-components/all/Generated/floorp_prefs_syncFFI.h",
+        "swift-components/all/Generated/floorp_workspaces_sync.swift",
+        "swift-components/all/Generated/floorp_workspaces_syncFFI.h",
         "swift-components/all/Generated/sync15.swift",
         "swift-components/all/Generated/syncmanager.swift",
     }
@@ -847,6 +876,12 @@ private func floorpReleaseGeneratedBindingSmoke() throws {
     let store = try FloorpPrefsSyncStore(delegate: delegate, initialState: state)
     _ = store.syncState()
     store.registerWithSyncManager()
+    let workspaces = try FloorpWorkspacesStore(path: "/tmp/floorp-release-smoke-workspaces.json")
+    try workspaces.bindAccount(uid: "release-smoke")
+    _ = try workspaces.snapshotJson()
+    _ = try workspaces.copyEligibilityJson()
+    workspaces.registerWithSyncManager()
+    try workspaces.invalidate()
     let manager = SyncManager()
     manager.disconnect()
     try manager.disconnectChecked()
@@ -884,6 +919,7 @@ def validate_floorp_swift_wrapper(
             generated_root / "sync15.swift",
             generated_root / "syncmanager.swift",
             generated_root / "floorp_prefs_sync.swift",
+            generated_root / "floorp_workspaces_sync.swift",
         ]
         smoke_path = extraction_root / "FloorpReleaseGeneratedBindingSmoke.swift"
         smoke_path.write_text(

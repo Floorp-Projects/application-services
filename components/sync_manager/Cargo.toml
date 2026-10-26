@@ -9,6 +9,7 @@ exclude = ["/android", "/ios"]
 [dependencies]
 autofill = { path = "../autofill" }
 floorp-prefs-sync = { path = "../floorp-prefs-sync" }
+floorp-workspaces-sync = { path = "../floorp-workspaces-sync" }
 sync15 = { path = "../sync15", features = ["sync-client"] }
 places = { path = "../places" }
 logins = { path = "../logins" }

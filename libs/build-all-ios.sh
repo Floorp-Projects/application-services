@@ -3,7 +3,7 @@
 set -euvx
 
 # This probably needs to be updated, but also includes the toolchain?
-IOS_MIN_SDK_VERSION="11.0"
+IOS_MIN_SDK_VERSION="${IOS_DEPLOYMENT_TARGET:-15.0}"
 # Our short-names for the architectures.
 TARGET_ARCHS=("x86_64" "arm64" "arm64-sim")
 

@@ -11,6 +11,8 @@ pub struct CollectionRequest {
     pub limit: Option<RequestLimit>,
     pub older: Option<ServerTimestamp>,
     pub newer: Option<ServerTimestamp>,
+    /// Opaque server pagination cursor, never interpreted as an integer.
+    pub offset: Option<String>,
 }
 
 impl CollectionRequest {

@@ -41,6 +41,9 @@ impl SyncManager {
             SyncEngineId::Passwords => logins::get_registered_sync_engine(engine_id),
             SyncEngineId::Tabs => tabs::get_registered_sync_engine(engine_id),
             SyncEngineId::Prefs => floorp_prefs_sync::get_registered_sync_engine(engine_id),
+            SyncEngineId::FloorpWorkspaces => {
+                floorp_workspaces_sync::get_registered_sync_engine(engine_id)
+            }
         }
     }
 
@@ -49,9 +52,11 @@ impl SyncManager {
         // products. It is a per-run special engine, never a toggleable engine.
         // In particular, the generic disable path declines it globally and
         // wipes the entire remote collection, not just Floorp Notes.
-        if enabled_changes.contains_key(floorp_prefs_sync::PREFS_COLLECTION_NAME) {
+        if enabled_changes.contains_key(floorp_prefs_sync::PREFS_COLLECTION_NAME)
+            || enabled_changes.contains_key(floorp_workspaces_sync::COLLECTION_NAME)
+        {
             return Err(SyncManagerError::UnsupportedFeature(
-                "changing enablement of the shared prefs collection".to_string(),
+                "changing enablement of a Floorp per-run collection".to_string(),
             ));
         }
         Ok(())
@@ -288,7 +293,9 @@ impl SyncManager {
             // The embedding app treats this list as engines that can be
             // toggled. `prefs` is intentionally selectable only by an explicit
             // per-run request, because globally disabling it wipes shared data.
-            .filter(|(name, _)| name != &SyncEngineId::Prefs)
+            .filter(|(name, _)| {
+                !matches!(name, SyncEngineId::Prefs | SyncEngineId::FloorpWorkspaces)
+            })
             .map(|(name, _)| name.to_string())
             .collect()
     }
@@ -326,6 +333,7 @@ impl SyncManager {
             // The shared prefs transport is opt-in per run. `All` means all
             // ordinary engines; a Floorp caller must name `prefs` explicitly.
             engine_map.remove(&SyncEngineId::Prefs);
+            engine_map.remove(&SyncEngineId::FloorpWorkspaces);
         }
         Ok(engine_map.into_values().collect())
     }
@@ -603,5 +611,42 @@ mod test {
         assert!(error.to_string().contains("Failed to reset prefs"));
         assert!(delegate.association_resets.load(Ordering::Relaxed) == 4);
         assert!(store.sync_state() == state_before_failed_disconnect);
+    }
+    #[test]
+    fn workspace_enablement_is_per_run_and_never_a_remote_toggle() {
+        for enabled in [false, true] {
+            let changes =
+                HashMap::from([(floorp_workspaces_sync::COLLECTION_NAME.into(), enabled)]);
+            assert!(matches!(
+                SyncManager::validate_enabled_changes(&changes),
+                Err(SyncManagerError::UnsupportedFeature(_))
+            ));
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "floorp-workspaces-registry-{}.json",
+            std::process::id()
+        ));
+        let store = Arc::new(
+            floorp_workspaces_sync::FloorpWorkspacesStore::new(dir.to_string_lossy().into())
+                .unwrap(),
+        );
+        store.clone().register_with_sync_manager();
+        let manager = SyncManager::new();
+        assert!(!manager
+            .get_available_engines()
+            .iter()
+            .any(|engine| engine == "floorp-workspaces"));
+        assert!(!manager
+            .calc_engines_to_sync(&SyncEngineSelection::All)
+            .unwrap()
+            .iter()
+            .any(|engine| engine.collection_name().as_ref() == "floorp-workspaces"));
+        let selected = manager
+            .calc_engines_to_sync(&SyncEngineSelection::Some {
+                engines: vec!["floorp-workspaces".into()],
+            })
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].is_read_only());
     }
 }

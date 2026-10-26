@@ -37,6 +37,7 @@ pub enum SyncEngineId {
     // are listed first.
     // This order matches desktop.
     Prefs,
+    FloorpWorkspaces,
     Passwords,
     Tabs,
     Bookmarks,
@@ -52,6 +53,7 @@ impl SyncEngineId {
     pub fn iter() -> impl Iterator<Item = SyncEngineId> {
         [
             Self::Prefs,
+            Self::FloorpWorkspaces,
             Self::Passwords,
             Self::Tabs,
             Self::Bookmarks,
@@ -72,6 +74,7 @@ impl SyncEngineId {
             Self::Addresses => "addresses",
             Self::CreditCards => "creditcards",
             Self::Prefs => "prefs",
+            Self::FloorpWorkspaces => "floorp-workspaces",
         }
     }
 }
@@ -94,6 +97,7 @@ impl TryFrom<&str> for SyncEngineId {
             "addresses" => Ok(Self::Addresses),
             "creditcards" => Ok(Self::CreditCards),
             "prefs" => Ok(Self::Prefs),
+            "floorp-workspaces" => Ok(Self::FloorpWorkspaces),
             _ => Err(value.into()),
         }
     }
@@ -125,6 +129,32 @@ impl TryFrom<&str> for SyncEngineId {
 /// Different engines will produce errors of different types.  To accommodate
 /// this, we force them all to return anyhow::Error.
 pub trait SyncEngine {
+    /// Opt-in read-only engines bypass every collection upload operation.
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    /// Called with the remote definition before association inspection/reset.
+    /// A read-only discovery engine can reject absent or future versions and
+    /// durably withdraw the previous generation's cache. Absent definitions
+    /// must never be synthesized for such engines by the setup state machine.
+    fn validate_remote_engine(&self, _version: Option<usize>) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Definitive account setup loss/upgrade prevents safely associating a
+    /// read-only cache with this server generation. Network errors do not call
+    /// this hook, so a confirmed offline snapshot remains usable.
+    fn sync_setup_unavailable(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Admission check before each incoming page. Receive-only providers use
+    /// it to stop further GETs after account/feature/association invalidation.
+    fn check_incoming_request(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn collection_name(&self) -> CollectionName;
 
     /// Prepares the engine for syncing. The tabs engine currently uses this to

@@ -26,7 +26,7 @@ mod token;
 mod util;
 
 pub(crate) use coll_state::{CollState, LocalCollStateMachine};
-pub(crate) use coll_update::{CollectionUpdate, fetch_incoming};
+pub(crate) use coll_update::{CollectionUpdate, fetch_incoming, fetch_incoming_checked};
 pub(crate) use collection_keys::CollectionKeys;
 pub(crate) use request::InfoConfiguration;
 pub(crate) use state::GlobalState;
